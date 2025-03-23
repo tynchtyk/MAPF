@@ -127,6 +127,7 @@ def expand_solution_paths(graph, solution):
 def visualize_solution(graph, robots, solution, frame_interval=500):
     """
     Visualizes robot movement on a map, ensuring each move is one cell per frame.
+    Targets disappear once reached by robots.
     """
     # Expand all solution paths so that each step is 1 cell
     solution = expand_solution_paths(graph, solution)
@@ -152,15 +153,19 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
     robot_patches = {}
 
     # Goal markers
+    target_patches = {}
     for robot in robots:
         color = colors(robot.robot_id % 10)
+        patches = []
         for gx, gy in robot.targets:
-            ax.plot(gx, gy, 'X', color=color, markersize=6, zorder=2)
+            patch, = ax.plot(gx, gy, 'X', color=color, markersize=20, zorder=2)
+            patches.append(((gx, gy), patch))
+        target_patches[robot.robot_id] = patches
 
     # Robot dot markers
     for robot in robots:
         color = colors(robot.robot_id % 10)
-        patch, = ax.plot([], [], 'o', color=color, markersize=8, zorder=3)
+        patch, = ax.plot([], [], 'o', color=color, markersize=20, zorder=3)
         robot_patches[robot.robot_id] = patch
 
     # Determine max length
@@ -172,7 +177,17 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
             if frame < len(path):
                 x, y = path[frame]
                 robot_patches[robot.robot_id].set_data(x, y)
-        return robot_patches.values()
+
+                # Check and remove targets if reached
+                new_patches = []
+                for (tx, ty), patch in target_patches[robot.robot_id]:
+                    if (tx, ty) == (x, y):
+                        patch.remove()
+                    else:
+                        new_patches.append(((tx, ty), patch))
+                target_patches[robot.robot_id] = new_patches
+
+        return list(robot_patches.values())
 
     ani = animation.FuncAnimation(
         fig, update, frames=max_time, interval=frame_interval, blit=True
@@ -198,22 +213,19 @@ def show_graph_structure(graph):
     ax.grid(which='minor', color='lightgray', linestyle='-', linewidth=0.5)
     ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
 
-    # Prepare map grid
+    # Walls
     grid_display = np.zeros((graph.height, graph.width))
     for y in range(graph.height):
         for x in range(graph.width):
             if graph.grid[y][x] == '@':
-                grid_display[y][x] = 1  # Wall
+                grid_display[y][x] = 1
+    ax.imshow(grid_display, cmap="Greys", origin="upper")
 
-    # Display map with imshow (origin is upper-left)
-    ax.imshow(grid_display, cmap="Greys", origin='upper')
     ax.set_title("Map + Graph")
     ax.set_xlim(-0.5, graph.width - 0.5)
     ax.set_ylim(-0.5, graph.height - 0.5)
     ax.set_aspect('equal')
-    ax.invert_yaxis()  # Match grid visual with (0,0) top-left
-
-    ax.legend(loc='upper right', fontsize='small', bbox_to_anchor=(1.15, 1))
+    ax.invert_yaxis()
     plt.show()
 
 def show_graph_with_robots(graph, robots):
@@ -232,36 +244,28 @@ def show_graph_with_robots(graph, robots):
     ax.grid(which='minor', color='lightgray', linestyle='-', linewidth=0.5)
     ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
 
-    # Prepare map grid
+    # Walls
     grid_display = np.zeros((graph.height, graph.width))
     for y in range(graph.height):
         for x in range(graph.width):
             if graph.grid[y][x] == '@':
-                grid_display[y][x] = 1  # Wall
+                grid_display[y][x] = 1
+    ax.imshow(grid_display, cmap="Greys", origin="upper")
 
-    # Display map with imshow (origin is upper-left)
-    ax.imshow(grid_display, cmap="Greys", origin='upper')
+    colors = plt.cm.get_cmap("tab10", len(robots))
 
-    # Colors for robots
-    cmap = plt.cm.get_cmap("tab10", len(robots))
-
-    # Overlay robots
+    # Robots and goals
     for robot in robots:
-        color = cmap(robot.robot_id % 10)
-
-        # Start position: circle
+        color = colors(robot.robot_id % 10)
         sx, sy = robot.start
-        ax.plot(sx, sy, 'o', color=color, markersize=8, label=f"R{robot.robot_id}", zorder=3)
-
-        # Goals: X markers
+        ax.plot(sx, sy, 'o', color=color, markersize=20, label=f"R{robot.robot_id}", zorder=3)
         for gx, gy in robot.targets:
-            ax.plot(gx, gy, 'X', color=color, markersize=6, zorder=3)
+            ax.plot(gx, gy, 'X', color=color, markersize=20, zorder=3)
 
-    ax.set_title("Map + Graph + Robot Start & Goals")
+    ax.set_title("Map + Robots Start & Goals")
     ax.set_xlim(-0.5, graph.width - 0.5)
     ax.set_ylim(-0.5, graph.height - 0.5)
     ax.set_aspect('equal')
-    ax.invert_yaxis()  # Match grid visual with (0,0) top-left
-
+    ax.invert_yaxis()
     ax.legend(loc='upper right', fontsize='small', bbox_to_anchor=(1.15, 1))
     plt.show()
