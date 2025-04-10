@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-class BaseEvolutionarylgorithm(ABC):
+class BaseEvolutionaryAlgorithm(ABC):
     def __init__(self, graph, robots, population_size=50, generations=100):
         self.graph = graph
         self.robots = robots

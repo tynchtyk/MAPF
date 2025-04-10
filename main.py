@@ -21,18 +21,21 @@ def main():
     graph = MapfGraph(config['map_file'])
 
     #show_graph_structure(graph)
-    show_graph_with_robots(graph, robots)
+    #show_graph_with_robots(graph, robots)
 
     # Plug in any algorithm here
-    #algo = PathBasedEA(graph, robots)
-    #solution = algo.evolve()
+    algo = PathBasedEA(graph, robots)
+    #algo.initial_population()
+    solution = algo.evolve()
 
     # Visualize or output
-    #visualize_solution(graph, robots, solution)
+    visualize_solution(graph, robots, solution)
 
-    #generations = np.arange(1, len(algo.fitness_history) + 1)
-    #plot_ea_metrics(generations, algo.fitness_history, algo.makespan_history, algo.conflict_history, algo.distance_history)
-    #plot_combined_metrics(generations, algo.fitness_history, algo.makespan_history, algo.conflict_history, algo.distance_history)
+    
+
+    generations = np.arange(1, len(algo.fitness_history) + 1)
+    plot_ea_metrics(generations, algo.fitness_history, algo.makespan_history, algo.conflict_history, algo.distance_history)
+    plot_combined_metrics(generations, algo.fitness_history, algo.makespan_history, algo.conflict_history, algo.distance_history)
 
 if __name__ == "__main__":
     main()

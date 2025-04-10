@@ -1,12 +1,12 @@
 import random
-from algorithms.base import BaseEvolutionarylgorithm
+from algorithms.base import BaseEvolutionaryAlgorithm
 from algorithms.operators import (
     roulette_selection,
     one_point_crossover,
     swap_mutation,
 )
 
-class SimpleEvolutionaryAlgorithm(BaseEvolutionarylgorithm):
+class SimpleEvolutionaryAlgorithm(BaseEvolutionaryAlgorithm):
     def initial_population(self):
         population = []
         for _ in range(self.population_size):
