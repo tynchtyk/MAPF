@@ -1,174 +1,352 @@
 import random
 import networkx as nx
-from algorithms.base import BaseEvolutionaryAlgorithm
-from collections import defaultdict, deque
+from collections import defaultdict
+from deap import base, creator, tools, algorithms
 import copy
+import numpy as np
+import math # Import math for infinity
 
-class PathBasedEA(BaseEvolutionaryAlgorithm):
+# Define a large constant for penalty (effectively infinity for practical path lengths)
+CONFLICT_PENALTY_BASE = 1e9
 
-    def __init__(self, graph, robots, population_size=50, generations=50):
-        super().__init__(graph, robots, population_size, generations)
-        self.fitness_history = []
-        print(f"Initialized PathBasedEA with population_size={population_size}, generations={generations}")
 
-    def initial_population(self):
-        population = []
-        methods = [self.heuristic_path, self.random_path]
-        for i in range(self.population_size):
-            individual = {}
-            temp_graph = self.randomize_graph_weights()
-            for robot in self.robots:
-                method = random.choice(methods)
-                raw_path = method(robot, temp_graph)
-                individual[robot.robot_id] = raw_path
-            repaired_individual = self.repair_individual(individual)
-            population.append(repaired_individual)
-            #print(f"Valid Individual {i+1}/{self.population_size} created")
-        #print(f"Initial valid population created with size: {len(population)}")
-        return population
+class PathBasedEA_DEAP():
+
+    def __init__(self, graph, robots, population_size=50, generations=50, p_cross=0.8, p_mut=0.2):
+        """
+        Initializes the Path-Based Evolutionary Algorithm.
+
+        Args:
+            graph (GraphWrapper): Wrapper containing the NetworkX graph.
+            robots (list[Robot]): List of Robot objects with IDs, start, and targets.
+            population_size (int): Number of individuals in the population.
+            generations (int): Number of generations to run the algorithm.
+            p_cross (float): Probability of crossover.
+            p_mut (float): Probability of mutation.
+        """
+        self.graph = graph
+        self.robots = robots
+        self.robot_map = {r.robot_id: r for r in robots} 
+        self.population_size = population_size
+        self.generations = generations
+        self.p_crossover = p_cross
+        self.p_mutation = p_mut
+
+
+        # --- DEAP Setup ---
+        # Create FitnessMin: objective is to minimize the value(s)
+        # weights=(-1.0,) means minimize the first (and only) objective value
+        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+        # Individual is a dictionary mapping robot_id -> path (list of nodes)
+        creator.create("Individual", dict, fitness=creator.FitnessMin)
+
+        
+        self.toolbox = base.Toolbox()
+        # Register functions for creating individuals and populations
+        self.toolbox.register("individual", self.generate_individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        # Register genetic operators
+        self.toolbox.register("evaluate", self.evaluate_fitness) # Renamed for clarity
+        self.toolbox.register("mate", self.crossover)
+        self.toolbox.register("mutate", self.mutation)
+        self.toolbox.register("select", tools.selRoulette)
+
+    def generate_individual(self):
+        """
+        Generates a single individual (potential solution).
+        Each robot gets a path generated using a heuristic on a randomly weighted graph.
+        The individual is then repaired to ensure basic validity (connectivity, targets).
+        """
+        individual = {}
+        # Use a temporary graph with randomized weights to encourage diverse starting paths
+        temp_graph = self.randomize_graph_weights()
+        for robot in self.robots:
+            # Use the heuristic to find an initial path for this robot
+            path = self.heuristic_path(robot, temp_graph)
+            individual[robot.robot_id] = path
+        # Repair ensures connectivity and target inclusion, conflict-free is argument
+        repaired_individual = self.repair_individual(individual, conflict_repair=True)
+        return creator.Individual(repaired_individual)
 
     def randomize_graph_weights(self):
+        """Creates a copy of the graph with randomized edge weights."""
         temp_graph = self.graph.G.copy()
+        # Assign random weights to encourage path diversity in initial population
         for u, v in temp_graph.edges():
-            temp_graph[u][v]['weight'] = random.uniform(0.5, 2.0)
+            temp_graph[u][v]['weight'] = random.uniform(0.5, 2.0) # Example range
         return temp_graph
 
     def heuristic_path(self, robot, graph):
+        """
+        Generates a plausible path for a single robot using a nearest-target heuristic.
+        Note: This is a simple heuristic, more complex ones (like TSP solvers) could be used.
+        """
         current_pos = robot.start
         path = [current_pos]
-        targets = robot.targets[:]
-        random.shuffle(targets)
-        while targets:
-            next_target = min(targets, key=lambda t: nx.shortest_path_length(graph, current_pos, t, weight='weight'))
-            segment = nx.shortest_path(graph, current_pos, next_target, weight='weight')
-            path.extend(segment[1:])
-            current_pos = next_target
-            targets.remove(next_target)
-        #print(f"Heuristic path generated for robot {robot.robot_id}: {path}")
+        # Copy targets to avoid modifying the original robot object's list
+        targets_to_visit = robot.targets[:]
+        # Optional: Shuffle to add randomness beyond just nearest selection
+        # random.shuffle(targets_to_visit)
+
+        while targets_to_visit:
+            # Find the target nearest to the current position based on shortest path length
+            try:
+                next_target = min(targets_to_visit,
+                                  key=lambda t: nx.shortest_path_length(graph, current_pos, t, weight='weight'))
+                # Find the shortest path segment to that nearest target
+                segment = nx.shortest_path(graph, current_pos, next_target, weight='weight')
+                # Append the segment (excluding the start node, which is already in path)
+                path.extend(segment[1:])
+                # Update current position and remove the visited target
+                current_pos = next_target
+                targets_to_visit.remove(next_target)
+            except nx.NetworkXNoPath:
+                # Handle cases where a target might be unreachable (e.g., disconnected graph)
+                print(f"Warning: Cannot find path for Robot {robot.robot_id} from {current_pos} to targets {targets_to_visit}. Skipping remaining targets.")
+                break # Stop trying to path for this robot if one target is unreachable
+
         return path
 
-    def random_path(self, robot, graph):
-        targets = robot.targets[:]
-        random.shuffle(targets)
-        path = [robot.start]
-        for target in targets:
-            segment = nx.shortest_path(graph, path[-1], target, weight='weight')
-            path.extend(segment[1:])
-        #print(f"Random path generated for robot {robot.robot_id}: {path}")
-        return path
+    def evaluate_fitness(self, individual):
+        # 1. Detect Conflicts
+        conflicts = self._detect_conflicts(individual)
+        conflict_count = len(conflicts)
 
-    def fitness(self, individual):
-        vertex_t = defaultdict(set)
-        edge_t = defaultdict(set)
-        max_steps = max(len(path) for path in individual.values())
+
+        # 3. Calculate the primary objective value (e.g., cost)
+        total_distance = sum(len(p) - 1 for p in individual.values() if p)
+
+        if conflict_count > 0:
+            fitness_value = total_distance + conflict_count * CONFLICT_PENALTY_BASE # Penalize for conflicts
+        else:
+            fitness_value = total_distance
+
+            # Alternative cost: Makespan (length of the longest path)
+            # makespan = max(len(p) for p in individual.values()) if individual else 0
+            # total_distance = makespan
+
+        return (fitness_value,)
+
+    def _detect_conflicts(self, individual):
+        """
+        Helper function to detect vertex and edge conflicts in a set of paths.
+
+        Args:
+            individual (dict): The individual (robot_id -> path) to check.
+
+        Returns:
+            list: A list of conflict descriptions (e.g., tuples describing the conflict).
+                  Returns an empty list if no conflicts are found.
+        """
+        conflicts = []
+        max_steps = 0
+        for path in individual.values():
+            if path:
+                max_steps = max(max_steps, len(path))
+
+        if max_steps == 0: # Handle empty individual case
+             return []
+
+        # Store positions and movements at each timestep
+        # vertex_occupation[t][node] = robot_id that occupies 'node' at time 't'
+        vertex_occupation = defaultdict(dict)
+        # edge_traversal[t][(u, v)] = robot_id that traverses edge u->v ending at time 't'
+        edge_traversal = defaultdict(dict)
 
         for t in range(max_steps):
-            for robot in self.robots:
-                path = individual[robot.robot_id]
-                if t >= len(path):
-                    continue
+            current_vertex_occupations = {} # Track occupations for this specific timestep 't'
 
-                curr = path[t]
-                prev = path[t - 1] if t > 0 else curr
-
-                # Vertex conflict
-                if curr in vertex_t[t]:
-                    return -1  # Conflict
-                vertex_t[t].add(curr)
-
-                # Edge conflict (swap)
-                if (curr, prev) in edge_t[t]:
-                    return -1  # Conflict
-                edge_t[t].add((prev, curr))
-
-        # No conflict: compute total travel + makespan
-        total_distance, makespan = 0, 0
-        for path in individual.values():
-            path_length = len(path) - 1
-            total_distance += path_length
-            makespan = max(makespan, path_length)
-
-        return total_distance# + (1.5 * makespan)
+            # --- Check Vertex Conflicts (including goal blocking) ---
+            for robot_id, path in individual.items():
+                if t < len(path):
+                    current_node = path[t]
+                    # Check if another robot is already planned to be at this node at this time
+                    if current_node in current_vertex_occupations:
+                        conflicts.append(('vertex', t, current_node, robot_id, current_vertex_occupations[current_node]))
+                    else:
+                         current_vertex_occupations[current_node] = robot_id
+                else:
+                     # Robot has finished its path, stays at its final node
+                     final_node = path[-1] if path else None
+                     if final_node is not None:
+                         if final_node in current_vertex_occupations:
+                             conflicts.append(('vertex_wait', t, final_node, robot_id, current_vertex_occupations[final_node]))
+                         else:
+                             current_vertex_occupations[final_node] = robot_id # Occupies final spot indefinitely
 
 
-    def selection(self, population):
-        # Filter out individuals with -1 fitness
-        valid_individuals = [(ind, self.fitness(ind)) for ind in population if self.fitness(ind) != -1]
+            vertex_occupation[t] = current_vertex_occupations # Store for next step's edge check
 
-        if not valid_individuals:
-            # Fallback if all are invalid — choose randomly
-            return random.choice(population)
+            # --- Check Edge Conflicts (Swapping) ---
+            if t > 0:
+                current_edge_traversals = {}
+                for robot_id, path in individual.items():
+                    if t < len(path):
+                        current_node = path[t]
+                        prev_node = path[t-1]
+                        edge = (prev_node, current_node)
+                        swap_edge = (current_node, prev_node) # The potential conflicting move
 
-        total_fitness = sum(fit for _, fit in valid_individuals)
-        pick = random.uniform(0, total_fitness)
-        current = 0
+                        # Check if another robot is making the opposite move ending at the same time
+                        if swap_edge in current_edge_traversals:
+                             conflicts.append(('edge', t, edge, robot_id, current_edge_traversals[swap_edge]))
+                        current_edge_traversals[edge] = robot_id
 
-        for ind, fit in valid_individuals:
-            current += fit
-            if current >= pick:
-                return ind
+                edge_traversal[t] = current_edge_traversals
 
-    def crossover(self, parent1, parent2):
-        child = {}
-        for robot in self.robots:
-            path1, path2 = parent1[robot.robot_id], parent2[robot.robot_id]
-            common = set(path1) & set(path2)
-            branching = list(common - {path1[-1]})
-            if branching:
-                crossover_vertex = random.choice(branching)
-                idx1, idx2 = path1.index(crossover_vertex), path2.index(crossover_vertex)
-                child_path = path1[:idx1] + path2[idx2:]
-                #print(f"Crossover at vertex {crossover_vertex} for robot {robot.robot_id}")
+        return conflicts
+
+
+    def crossover(self, ind1, ind2):
+        """
+        Performs crossover between two individuals.
+        Uses a path-based crossover: picks a common node and swaps path segments.
+        Repairs the resulting children.
+        """
+        child1_data, child2_data = {}, {}
+        # Ensure ind1 and ind2 are dictionaries if they are DEAP individuals
+        ind1_data = dict(ind1)
+        ind2_data = dict(ind2)
+
+        for robot_id in self.robot_map.keys():
+            path1 = ind1_data.get(robot_id, [])
+            path2 = ind2_data.get(robot_id, [])
+
+            # Simple case: if either path is empty, just copy
+            if not path1 or not path2:
+                child1_data[robot_id] = path1[:]
+                child2_data[robot_id] = path2[:]
+                continue
+
+            # Find common nodes, excluding the final destination (less likely to be good crossover points)
+            common_nodes = list(set(path1[:-1]) & set(path2[:-1]))
+
+            if common_nodes:
+                # Choose a random common node as the crossover point
+                crossover_vertex = random.choice(common_nodes)
+                # Find the first index of the crossover vertex in each path
+                idx1 = path1.index(crossover_vertex)
+                idx2 = path2.index(crossover_vertex)
+
+                # Swap segments
+                child1_path = path1[:idx1+1] + path2[idx2+1:]
+                child2_path = path2[:idx2+1] + path1[idx1+1:]
             else:
-                child_path = path1[:]
-                #print(f"No crossover point found; child path copied from parent for robot {robot.robot_id}")
-            child[robot.robot_id] = child_path
-        repaired_child = self.repair_individual(child)
-        return repaired_child
+                # No common nodes (except maybe endpoint), just copy parents
+                child1_path = path1[:]
+                child2_path = path2[:]
+
+            child1_data[robot_id] = child1_path
+            child2_data[robot_id] = child2_path
+
+        # Create new individuals from the generated path data
+        child1 = creator.Individual(child1_data)
+        child2 = creator.Individual(child2_data)
+
+        # Repair children to ensure connectivity and target inclusion
+        # Note: Repair does NOT guarantee conflict-free paths here.
+        child1 = creator.Individual(self.repair_individual(child1))
+        child2 = creator.Individual(self.repair_individual(child2))
+
+        return child1, child2
 
     def mutation(self, individual):
-        mutant = individual.copy()
-        for robot in self.robots:
-            path = mutant[robot.robot_id][:]
-            mutation_type = random.choice(['rewire', 'vertex'])
-            #print(f"Mutation type {mutation_type} chosen for robot {robot.robot_id}")
+        """
+        Performs mutation on an individual.
+        Randomly chooses a robot and applies one type of mutation:
+        - 'rewire': Replaces a path segment with a new shortest path.
+        - 'insert_vertex': Inserts a random node into the path.
+        - 'delete_vertex': Deletes a random node (not start/end) from the path.
+        Repairs the resulting mutant.
+        """
+        # Ensure we are working with the dictionary data
+        mutant_data = dict(individual)
 
-            if mutation_type == 'rewire' and len(path) > 3:
-                idx1, idx2 = sorted(random.sample(range(len(path)), 2))
-                segment = self.graph.shortest_path(path[idx1], path[idx2])
-                path = path[:idx1] + segment + path[idx2+1:]
-                #print(f"Segment rewired between indices {idx1} and {idx2} for robot {robot.robot_id}")
+        # Choose a random robot to mutate
+        robot_id_to_mutate = random.choice(list(self.robot_map.keys()))
+        path = mutant_data.get(robot_id_to_mutate, [])
 
-            elif mutation_type == 'vertex':
-                if random.random() < 0.5 and len(path) > 2:
-                    del_idx = random.randint(1, len(path)-2)
-                    del path[del_idx]
-                    #print(f"Vertex deleted at index {del_idx} for robot {robot.robot_id}")
-                else:
-                    insert_vertex = random.choice(list(self.graph.G.nodes))
-                    insert_idx = random.randint(1, len(path)-1)
-                    path.insert(insert_idx, insert_vertex)
-                    #print(f"Vertex {insert_vertex} inserted at index {insert_idx} for robot {robot.robot_id}")
+        if len(path) < 2: # Cannot mutate empty or single-node paths effectively
+             return creator.Individual(self.repair_individual(mutant_data)), # Return repaired original
 
-            mutant[robot.robot_id] = path
-        repaired_mutant = self.repair_individual(mutant)
-        return repaired_mutant
+        # Choose a mutation type
+        mutation_type = random.choice(['rewire', 'insert_vertex', 'delete_vertex'])
 
-    def repair_individual(self, individual):
+        try:
+            if mutation_type == 'rewire' and len(path) >= 3:
+                # Select two distinct indices, excluding start (0) and end (-1)
+                idx1, idx2 = sorted(random.sample(range(1, len(path) - 1), 2))
+                start_node = path[idx1]
+                end_node = path[idx2]
+                # Find a new shortest path between these nodes (using original graph weights)
+                new_segment = self.graph.shortest_path(start_node, end_node)
+                # Replace the old segment with the new one
+                mutated_path = path[:idx1] + new_segment + path[idx2+1:]
+                mutant_data[robot_id_to_mutate] = mutated_path
+
+            elif mutation_type == 'insert_vertex':
+                # Choose a random node from the graph to insert
+                # Avoid inserting start/end nodes of the current path to prevent trivial loops
+                possible_nodes = list(self.graph.G.nodes - {path[0], path[-1]})
+                if not possible_nodes: # Graph might be too small
+                   return creator.Individual(self.repair_individual(mutant_data)),
+
+                insert_node = random.choice(possible_nodes)
+                # Choose a random index to insert at (not at the very beginning or end)
+                insert_idx = random.randint(1, len(path) - 1)
+                # Create the new path
+                mutated_path = path[:insert_idx] + [insert_node] + path[insert_idx:]
+                mutant_data[robot_id_to_mutate] = mutated_path
+
+
+            elif mutation_type == 'delete_vertex' and len(path) >= 3:
+                 # Choose a random index to delete (not start or end)
+                 delete_idx = random.randint(1, len(path) - 2)
+                 # Create the new path
+                 mutated_path = path[:delete_idx] + path[delete_idx+1:]
+                 mutant_data[robot_id_to_mutate] = mutated_path
+
+            else: # If conditions for rewire/delete aren't met, or invalid type somehow
+                 mutated_path = path # No change
+                 mutant_data[robot_id_to_mutate] = mutated_path
+
+
+        except nx.NetworkXNoPath:
+            # If rewire fails to find a path, keep the original path segment
+             mutant_data[robot_id_to_mutate] = path # No change on error
+             print(f"Warning: Mutation 'rewire' failed for robot {robot_id_to_mutate}, no path found.")
+        except Exception as e:
+             print(f"Warning: Error during mutation for robot {robot_id_to_mutate}: {e}")
+             mutant_data[robot_id_to_mutate] = path # Revert on unexpected error
+
+
+        # Repair the mutated individual (for connectivity/targets)
+        # It returns a new dictionary, which we wrap in the Individual creator
+        repaired_mutant = self.repair_individual(mutant_data)
+        return creator.Individual(repaired_mutant), # Return as tuple as required by DEAP
+
+    def repair_individual(self, individual: dict, conflict_repair = False) -> dict:
         initial_individual = individual.copy()
         cache = {}
+
         def safe_shortest(u, v):
             if (u, v) not in cache:
-                cache[(u, v)] = nx.shortest_path(self.graph.G, u, v)
+                try:
+                    cache[(u, v)] = nx.shortest_path(self.graph.G, u, v)
+                except nx.NetworkXNoPath:
+                    cache[(u, v)] = [u]  # Stay in place if unreachable
             return cache[(u, v)]
-        
+
+        # Step 1: Basic path repair (connectivity + targets)
         repaired = {}
         for robot in self.robots:
             raw = individual[robot.robot_id]
+            if not raw:
+                raw = [robot.start]
             path = [raw[0]]
             for v in raw[1:]:
                 if v == path[-1]:
-                    path.append(v)  # waiting at the same position is valid
+                    path.append(v)
                 elif not self.graph.G.has_edge(path[-1], v):
                     path += safe_shortest(path[-1], v)[1:]
                 else:
@@ -179,111 +357,113 @@ class PathBasedEA(BaseEvolutionaryAlgorithm):
                     path += safe_shortest(path[-1], t)[1:]
 
             repaired[robot.robot_id] = path
-        expanded_individual = copy.deepcopy(repaired)
-        """max_steps = max(len(p) for p in repaired.values())
-        max_iterations = 10000
-        iterations = 0
-
-        while iterations < max_iterations:
-            conflict = False
-            vertex_t = defaultdict(dict)
-            edge_t = defaultdict(set)
-
-            for t in range(max_steps):
-                for robot in sorted(self.robots, key=lambda r: r.priority):
-                    path = repaired[robot.robot_id]
-                    if t >= len(path):
-                        continue
-
-                    curr = path[t]
-                    prev = path[t - 1] if t > 0 else curr
-
-                    # Check vertex conflict
-                    for other_id, other_pos in vertex_t[t].items():
-                        if curr == other_pos:
-                            path.insert(t, prev)
-                            conflict = True
-                            break
-                    if conflict:
-                        break
-
-                    # Check edge conflict
-                    if (curr, prev) in edge_t[t]:
-                        for other_id in vertex_t[t]:
-                            other_path = repaired[other_id]
-                            if t < len(other_path):
-                                other_curr = other_path[t]
-                                other_prev = other_path[t - 1] if t > 0 else other_curr
-                                if other_curr == prev and other_prev == curr:
-                                    if robot.priority > self._get_robot_by_id(other_id).priority:
-                                        path.insert(t, prev)
-                                    else:
-                                        repaired[other_id].insert(t, other_prev)
-                                    conflict = True
-                                    break
-                    if conflict:
-                        break
-
-                    vertex_t[t][robot.robot_id] = curr
-                    edge_t[t].add((prev, curr))
-
-                if conflict:
-                    break
-
-            if not conflict:
-                break
-
+        if(conflict_repair):
+            # Step 2: Conflict-aware timing adjustment
             max_steps = max(len(p) for p in repaired.values())
-            iterations += 1
+            schedule = defaultdict(dict)  # schedule[t][node] = robot_id
+            delay_map = {r.robot_id: 0 for r in self.robots}
 
-        if iterations >= max_iterations:
-            print("Repair function exceeded maximum iterations — possible infinite loop.", 
-                               "\nInitial :", initial_individual,
-                               "\nExpanded :", expanded_individual)
-            self.repair_individual(individual)"""
+            # Use a simple prioritization by robot_id order
+            for robot in sorted(self.robots, key=lambda r: r.robot_id):
+                rid = robot.robot_id
+                path = repaired[rid][:]
 
+                while True:
+                    conflict_found = False
+                    for t, node in enumerate(path):
+                        real_time = t + delay_map[rid]
+                        # Vertex conflict
+                        if node in schedule[real_time]:
+                            conflict_found = True
+                            break
+                        # Edge conflict
+                        if t > 0:
+                            prev = path[t - 1]
+                            for other_robot, other_path in repaired.items():
+                                if other_robot == rid:
+                                    continue
+                                if real_time - 1 < len(other_path) and real_time < len(other_path):
+                                    if other_path[real_time - 1] == node and other_path[real_time] == prev:
+                                        conflict_found = True
+                                        break
+                        if conflict_found:
+                            break
+
+                    if conflict_found:
+                        delay_map[rid] += 1
+                        path = [path[0]] * delay_map[rid] + repaired[rid]  # Add wait at start
+                    else:
+                        break
+
+                # Update schedule
+                for t, node in enumerate(path):
+                    schedule[t][node] = rid
+
+                repaired[rid] = path
         return repaired
 
-    def _get_robot_by_id(self, robot_id):
-        for r in self.robots:
-            if r.robot_id == robot_id:
-                return r
-        raise ValueError(f"Robot ID {robot_id} not found")
 
 
-    def evolve(self, elitism_size=5):
-        population = self.initial_population()
-        population = [self.repair_individual(ind) for ind in population]
+    def run(self):
+        """
+        Executes the evolutionary algorithm.
+        """
+        # Initialize population
+        pop = self.toolbox.population(n=self.population_size)
 
-        for generation in range(self.generations):
-            population.sort(key=lambda ind: (self.fitness(ind) == -1, self.fitness(ind)))
-            best_fitness = self.fitness(population[0])
-            print(f"Generation {generation}: Best Fitness = {best_fitness}")
-            self.fitness_history.append(best_fitness)
+        # Hall of Fame stores the best individual found so far
+        # Since we minimize, it will store the individual with the lowest fitness value
+        hof = tools.HallOfFame(1)
 
-            # ✅ Apply Elitism — Keep top N individuals
-            elites = [copy.deepcopy(ind) for ind in population[:elitism_size]]
-            next_gen = elites[:]
+        # Statistics to track during evolution
+        stats = tools.Statistics(lambda ind: ind.fitness.values[0]) # Get the single fitness value
+        stats.register("avg", np.mean)
+        stats.register("min", np.min) # Minimum fitness value (best individual's cost)
+        stats.register("max", np.max) # Maximum fitness value (worst individual's cost/penalty)
 
-            # 🧬 Generate the rest of the next generation
-            while len(next_gen) < self.population_size:
-                parent1 = self.selection(population)
-                parent2 = self.selection(population)
-                child = self.crossover(parent1, parent2)
-                mutant_child = self.mutation(child)
-                repaired_child = self.repair_individual(mutant_child)
-                next_gen.append(repaired_child)
+        # --- Run the EA ---
+        # eaMuPlusLambda: (μ + λ) evolutionary algorithm
+        pop, logbook = algorithms.eaMuPlusLambda(
+            population=pop,
+            toolbox=self.toolbox,
+            mu=self.population_size,          # Number of individuals to select for the next generation
+            lambda_=self.population_size,     # Number of children to produce at each generation
+            cxpb=self.p_crossover,           # Probability of mating two individuals
+            mutpb=self.p_mutation,           # Probability of mutating an individual
+            ngen=self.generations,           # Number of generations
+            stats=stats,                     # Statistics object
+            halloffame=hof,                  # Hall of Fame object
+            verbose=True                     # Print progress
+        )
 
-            population = next_gen
+        # --- Store History ---
+        gen = logbook.select("gen")
+        self.mean_fitness_history = logbook.select("avg")
+        self.min_fitness_history = logbook.select("min") # Best fitness per gen
+        self.max_fitness_history = logbook.select("max") # Worst fitness per gen
 
-        # ✅ Return the best valid individual
-        valid_population = [ind for ind in population if self.fitness(ind) != -1]
-        if not valid_population:
-            print("⚠️ All individuals had conflicts. Returning a random one.")
-            return random.choice(population)
+        # Calculate average conflict count per generation (approximate)
+        # Note: This requires evaluating fitness again or modifying the stats/logging
+        # For simplicity, let's calculate it post-hoc for the final population
+        # Or ideally, integrate conflict counting into the stats during the run (more advanced DEAP use)
+        final_pop_conflicts = [self._detect_conflicts(ind) for ind in pop]
+        avg_final_conflicts = np.mean([len(c) for c in final_pop_conflicts])
+        print(f"Average conflicts in final population: {avg_final_conflicts:.2f}")
+        # A more robust history would require modifying the EA loop or stats object.
 
-        best_individual = min(valid_population, key=lambda ind: self.fitness(ind))
-        print(f"Best individual found with fitness: {self.fitness(best_individual)}")
-        return best_individual
+        # The best individual found is in the Hall of Fame
+        best_individual = hof[0]
+        best_fitness = best_individual.fitness.values[0]
 
+        print("-" * 30)
+        print(f"Best Individual Fitness (Cost): {best_fitness}")
+        if best_fitness >= CONFLICT_PENALTY_BASE:
+             print("Warning: Best solution found still contains conflicts!")
+             num_conflicts = self._detect_conflicts(best_individual)
+             print(f"Number of conflicts in best solution: {len(num_conflicts)}")
+             # print("Conflicts:", num_conflicts) # Optional: print details
+        else:
+             print("Best solution appears conflict-free.")
+             # print("Best Individual Paths:", best_individual) # Optional: print paths
 
+        return best_individual, logbook
