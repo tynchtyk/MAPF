@@ -1,19 +1,24 @@
 
-map_file: datasets/simple-3x3/simple-3x3.map
-#map_file: datasets/empty-8x8/empty-8-8.map
+#map_file: datasets/simple-3x3/simple-3x3.map
+#map_file: datasets/simple-2x5/simple-2x5.map
+map_file: datasets/empty-8x8/empty-8-8.map
 #map_file: datasets/maze_32x32/maze-32-32-4.map
 
-generated_scenario_file: datasets/simple-3x3/generated-scen/simple.scen
-#generated_scenario_file: datasets/empty-8x8/generated-scen/empty-8-8-even-1.scen
+#generated_scenario_file: datasets/simple-3x3/generated-scen/simple.scen
+#generated_scenario_file: datasets/simple-2x5/generated-scen/simple.scen
+generated_scenario_file: datasets/empty-8x8/generated-scen/empty-8-8-even-1.scen
 #generated_scenario_file: datasets/maze_32x32/generated-scen/maze-32-32-4-even-1.scen
 
 scenario_file: datasets/empty-8x8/scen-even/empty-8-8-even-1.scen
 
+
 min_goals: 2
 max_goals: 4
+goal_count: 3
+robot_count: 2
 
 ea_params:
   crossover_rate: 0.6
   mutation_rate: 0.4
-  num_generations: 50
+  num_generations: 500
   population_size: 50

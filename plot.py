@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import matplotlib.ticker as mticker
 
 def plot_ea_metrics(generations, fitness_history, makespan_history, conflict_history, distance_history):
     sns.set(style="whitegrid")
@@ -73,11 +74,44 @@ def plot_combined_metrics(generations, min_fitness_history, max_fitness_history,
     plt.tight_layout()
     plt.show()
 
+def plot_analysis(analysis_data):
+    """Generates three analysis plots"""
+    plt.figure(figsize=(15, 5))
+    
+    # Exploration plot
+    plt.subplot(1, 3, 1)
+    gens = [x['generation'] for x in analysis_data['exploration']]
+    plt.plot(gens, [x['path_diversity'] for x in analysis_data['exploration']])
+    plt.title('Solution Diversity')
+    plt.xlabel('Generation')
+    plt.ylabel('Unique Solutions Ratio')
+    
+    # Gradient plot
+    plt.subplot(1, 3, 2)
+    gens = [x['generation'] for x in analysis_data['gradient']]
+    plt.plot(gens, [x['avg_improvement'] for x in analysis_data['gradient']])
+    plt.title('Fitness Improvement')
+    plt.xlabel('Generation')
+    plt.ylabel('Average Improvement')
+    
+    # Conflict plot
+    plt.subplot(1, 3, 3)
+    gens = [x['generation'] for x in analysis_data['conflicts']]
+    plt.plot(gens, [x['avg_conflicts'] for x in analysis_data['conflicts']])
+    plt.plot(gens, [x['min_conflicts'] for x in analysis_data['conflicts']])
+    plt.plot(gens, [x['max_conflicts'] for x in analysis_data['conflicts']])
+    plt.title('Conflict Evolution')
+    plt.xlabel('Generation')
+    plt.ylabel('Number of Conflicts')
+    plt.legend(['Average', 'Minimum', 'Maximum'])
+    
+    plt.tight_layout()
+    plt.show()
 
 def plot_deap_statistics(logbook,
                          title="Evolutionary Algorithm Fitness Statistics",
                          y_label="Fitness (Cost)",
-                         use_log_scale_threshold=100):
+                         use_log_scale_threshold=1):
     """
     Plots evolution of fitness statistics (min, max, avg, std) from DEAP's logbook.
     Assumes a minimization context where lower fitness values are better.
@@ -141,7 +175,7 @@ def plot_deap_statistics(logbook,
     plt.legend(loc="best") # Let matplotlib decide the best location
 
     # --- Dynamic Y-axis Scaling ---
-    min_positive_best_fit = fit_best[fit_best > 0] if np.any(fit_best > 0) else None
+    """min_positive_best_fit = fit_best[fit_best > 0] if np.any(fit_best > 0) else None
     use_log = False
     if use_log_scale_threshold and use_log_scale_threshold > 0 and min_positive_best_fit is not None and len(min_positive_best_fit) > 0:
          # Check if the range warrants log scale (e.g., max average is much larger than min best)
@@ -157,7 +191,12 @@ def plot_deap_statistics(logbook,
     else:
         # For linear scale, set the bottom limit to be slightly below the minimum fitness
         min_y = np.min(fit_best)
-        plt.ylim(bottom=min_y * 1.1 if min_y < 0 else min_y * 0.9)
+        plt.ylim(bottom=min_y * 1.1 if min_y < 0 else min_y * 0.9)"""
+
+    # --- Y-axis Formatting (no log scale) ---
+    min_y = np.min(fit_best)
+    plt.ylim(bottom=min_y * 1.1 if min_y < 0 else min_y * 0.9)
+    plt.gca().yaxis.set_major_formatter(mticker.StrMethodFormatter('{x:.2f}'))  # Always show direct numbers
 
     plt.tight_layout() # Adjust plot to prevent labels overlapping
     plt.show()

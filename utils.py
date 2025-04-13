@@ -18,80 +18,143 @@ def load_map(map_file):
 
     return grid, width, height
 
-def generate_new_scenario(original_scenario_file, output_scenario_file, min_goals=2, max_goals=5):
+import os
+import random
+
+def generate_new_scenario(original_scenario_file, output_scenario_file, robot_count, min_goals=2, max_goals=5):
     """
     Generate a new MAPF scenario file with multiple goals per robot.
     
     :param original_scenario_file: Path to the input scenario file.
     :param output_scenario_file: Path to save the new scenario file.
+    :param robot_count: Number of robots to include in the generated scenario.
     :param min_goals: Minimum number of goals per robot.
     :param max_goals: Maximum number of goals per robot.
     """
     robots = {}
-    goal_positions = []  # Stores all goal positions for random selection
+    goal_positions = []
 
     with open(original_scenario_file, 'r') as f:
         lines = f.readlines()
 
     # Ensure output folder exists
     output_folder = os.path.dirname(output_scenario_file)
-    if not os.path.exists(output_folder):
+    if output_folder and not os.path.exists(output_folder):
         os.makedirs(output_folder)
         print(f"📁 Created directory: {output_folder}")
 
     header = lines[0] if lines[0].startswith("version") else None
     map_name, map_width, map_height = None, None, None 
-    scenario_data = []
 
     for line in lines:
-        if line.startswith("version"):  # Skip header
+        if line.startswith("version"):
             continue
 
-        # Extract values
         values = line.split()
         if map_name is None:
-            map_name = values[1]
-            map_width = values[2]
-            map_height = values[3]
-        robot_id = int(values[0])  # Unique robot ID
+            map_name, map_width, map_height = values[1], values[2], values[3]
+
+        robot_id = int(values[0])
         start_x, start_y = int(values[4]), int(values[5])
         goal_x, goal_y = int(values[6]), int(values[7])
 
-        # Add goal position to the global pool
         goal_positions.append((goal_x, goal_y))
 
-        # Store robot start position
-        if robot_id not in robots:
-            robots[robot_id] = {"start": (start_x, start_y), "targets": []}
+        if robot_id not in robots and len(robots) < robot_count:
+            robots[robot_id] = {"start": (start_x, start_y), "targets": [(goal_x, goal_y)]}
+        elif robot_id in robots:
+            robots[robot_id]["targets"].append((goal_x, goal_y))
 
-        # Assign the original goal
-        robots[robot_id]["targets"].append((goal_x, goal_y))
+    # Limit to requested number of robots
+    selected_robots = dict(list(robots.items())[:robot_count])
+    goal_positions = list(set(goal_positions))  # unique goals
 
-    # Ensure goal_positions are unique before selecting additional goals
-    goal_positions = list(set(goal_positions))
-
-    # Assign additional random goals to each robot
-    for robot_id, robot_data in robots.items():
+    for robot_id, robot_data in selected_robots.items():
+        current_goals = set(robot_data["targets"])
         num_goals = random.randint(min_goals, max_goals)
 
-        # Ensure at least all original goals are used and distributed
-        additional_goals = random.sample(goal_positions, min(num_goals - 1, len(goal_positions)))
+        available_goals = list(set(goal_positions) - current_goals)
+        random.shuffle(available_goals)
+        additional_goals = available_goals[:max(0, num_goals - len(current_goals))]
+
         robot_data["targets"].extend(additional_goals)
 
-    # Generate new scenario content
+    # Write new scenario
     with open(output_scenario_file, "w") as f:
         if header:
-            f.write(header)  # Write the "version 1" header if it exists
+            f.write(header)
 
-        for robot_id, robot_data in robots.items():
+        for robot_id, robot_data in selected_robots.items():
             start_x, start_y = robot_data["start"]
-
             for goal_x, goal_y in robot_data["targets"]:
-                # Write scenario in original format with default map name, width, height
                 f.write(f"{robot_id} {map_name} {map_width} {map_height} {start_x} {start_y} {goal_x} {goal_y} 0.00000000\n")
 
     print(f"✅ New scenario file saved as: {output_scenario_file}")
 
+def generate_multigoal_scenario_from_file(original_scenario_file, output_scenario_file, robot_count, num_goals_per_robot):
+    """
+    Generate a new MAPF scenario file with a fixed number of goals per robot,
+    treating each line as a unique robot and ignoring robot_id in the file.
+
+    :param original_scenario_file: Path to the input scenario file.
+    :param output_scenario_file: Path to save the new scenario file.
+    :param robot_count: Number of robots to include in the generated scenario.
+    :param num_goals_per_robot: Exact number of goals to assign per robot.
+    """
+    agents = []
+    goal_positions = []
+
+    with open(original_scenario_file, 'r') as f:
+        lines = f.readlines()
+
+    # Ensure output folder exists
+    output_folder = os.path.dirname(output_scenario_file)
+    if output_folder and not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+        print(f"📁 Created directory: {output_folder}")
+
+    header = lines[0] if lines[0].startswith("version") else None
+    map_name, map_width, map_height = None, None, None
+
+    # Extract agent start-goal pairs and goal positions
+    for line in lines:
+        if line.startswith("version"):
+            continue
+
+        values = line.split()
+        if map_name is None:
+            map_name, map_width, map_height = values[1], values[2], values[3]
+
+        start_x, start_y = int(values[4]), int(values[5])
+        goal_x, goal_y = int(values[6]), int(values[7])
+
+        agents.append({"start": (start_x, start_y), "original_goal": (goal_x, goal_y)})
+        goal_positions.append((goal_x, goal_y))
+
+    # Limit to requested number of agents
+    selected_agents = agents[:robot_count]
+    goal_pool = list(set(goal_positions))  # Unique goals
+
+    # Assign multiple goals per agent
+    for agent in selected_agents:
+        assigned_goals = {agent["original_goal"]}
+        available_goals = list(set(goal_pool) - assigned_goals)
+        random.shuffle(available_goals)
+        additional_goals = available_goals[:max(0, num_goals_per_robot - 1)]
+        agent["goals"] = list(assigned_goals) + additional_goals
+
+    # Write to output .scen file
+    with open(output_scenario_file, "w") as f:
+        if header:
+            f.write(header)
+
+        for i, agent in enumerate(selected_agents):
+            start_x, start_y = agent["start"]
+            for goal_x, goal_y in agent["goals"]:
+                f.write(f"{i} {map_name} {map_width} {map_height} {start_x} {start_y} {goal_x} {goal_y} 0.00000000\n")
+
+    print(f"✅ New scenario file saved as: {output_scenario_file}")
+    
 def load_scenario(output_scenario_file):
     robot_list = []
     with open(output_scenario_file, 'r') as f:

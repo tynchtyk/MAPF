@@ -2,6 +2,9 @@ import networkx as nx
 from utils import load_map
 
 
+def manhattan_distance(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
 class MapfGraph:
     def __init__(self, map_file):
         self.grid, self.width, self.height = load_map(map_file)
@@ -13,7 +16,7 @@ class MapfGraph:
             for x in range(self.width):
                 if self.grid[y][x] == '.':  # Passable tile
                     self.G.add_node((x, y))
-                    for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                         nx_, ny_ = x + dx, y + dy
                         if (
                             0 <= nx_ < self.width and
@@ -24,12 +27,13 @@ class MapfGraph:
 
     def shortest_path(self, start, goal):
         try:
-            return nx.shortest_path(self.G, source=start, target=goal)
+            return nx.astar_path(self.G, source=start, target=goal, heuristic=manhattan_distance)
         except nx.NetworkXNoPath:
             return []
 
     def shortest_path_length(self, start, goal):
         try:
-            return nx.shortest_path_length(self.G, source=start, target=goal)
+            return nx.astar_path_length(self.G, source=start, target=goal, heuristic=manhattan_distance)
         except nx.NetworkXNoPath:
             return float('inf')
+

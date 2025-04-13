@@ -9,17 +9,6 @@ import math # Import math for infinity
 class PathBasedEA_DEAP():
 
     def __init__(self, graph, robots, population_size=50, generations=50, p_cross=0.8, p_mut=0.2):
-        """
-        Initializes the Path-Based Evolutionary Algorithm.
-
-        Args:
-            graph (GraphWrapper): Wrapper containing the NetworkX graph.
-            robots (list[Robot]): List of Robot objects with IDs, start, and targets.
-            population_size (int): Number of individuals in the population.
-            generations (int): Number of generations to run the algorithm.
-            p_cross (float): Probability of crossover.
-            p_mut (float): Probability of mutation.
-        """
         self.graph = graph
         self.robots = robots
         self.robot_map = {r.robot_id: r for r in robots} 
@@ -27,89 +16,94 @@ class PathBasedEA_DEAP():
         self.generations = generations
         self.p_crossover = p_cross
         self.p_mutation = p_mut
-        self.generation_best = []
 
-         # Calculate penalty base automatically
-        self.CONFLICT_PENALTY_BASE = self._calculate_penalty_base()
-        print(f"Automatically calculated CONFLICT_PENALTY_BASE: {self.CONFLICT_PENALTY_BASE}")
+        # Adjust conflict penalty to be not too huge
+        self.CONFLICT_PENALTY = 50
 
-        # --- DEAP Setup ---
-        # Create FitnessMin: objective is to minimize the value(s)
-        # weights=(-1.0,) means minimize the first (and only) objective value
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-        # Individual is a dictionary mapping robot_id -> path (list of nodes)
+        # Setup DEAP
+        creator.create("FitnessMin", base.Fitness, weights=(-1.0,))  # or (-1.0, -1.0) for multiobj
         creator.create("Individual", dict, fitness=creator.FitnessMin)
 
-        
         self.toolbox = base.Toolbox()
-        # Register functions for creating individuals and populations
         self.toolbox.register("individual", self.generate_individual)
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
-        # Register genetic operators
-        self.toolbox.register("evaluate", self.evaluate_fitness) # Renamed for clarity
+        self.toolbox.register("evaluate", self.evaluate_fitness)
         self.toolbox.register("mate", self.crossover)
         self.toolbox.register("mutate", self.mutation)
-        #self.toolbox.register("select", tools.selRoulette)
+        
+        # Switch to a custom tournament that heavily penalizes conflicts
         self.toolbox.register("select", lambda inds, k: self.custom_tournament_selection(inds, k, tournsize=3))
 
-    
+
+
+    def generate_individual(self):
+        """Generate each path with a little randomization, even if there's only 1 target."""
+        individual_data = {}
+
+        for robot in self.robots:
+            targets = robot.targets[:]
+            random.shuffle(targets)  # This won't help if len(targets) == 1, but keep it for multi-target robots
+
+            path = [robot.start]
+            for t in targets:
+                seg = self.graph.shortest_path(path[-1], t)
+                path.extend(seg[1:])
+
+            # -- ADD RANDOM DETOUR / WAIT if there's only 1 target to get variation --
+            if len(targets) <= 1:
+                # 50% chance to insert a wait somewhere
+                if random.random() < 0.5 and len(path) > 1:
+                    insert_idx = random.randint(1, len(path) - 1)
+                    path = path[:insert_idx] + [path[insert_idx]] + path[insert_idx:]
+                
+                # 50% chance to insert a random node (detour) near the middle
+                if random.random() < 0.5 and len(path) > 2:
+                    mid_idx = len(path) // 2
+                    # pick a random neighbor of path[mid_idx] to visit
+                    candidates = list(self.graph.G.neighbors(path[mid_idx]))
+                    if candidates:
+                        detour_node = random.choice(candidates)
+                        # insert the detour node plus the shortest path back
+                        segment_to_detour = self.graph.shortest_path(path[mid_idx], detour_node)
+                        segment_back = self.graph.shortest_path(detour_node, path[mid_idx+1])
+                        # rebuild path around the insertion
+                        path = (path[:mid_idx] 
+                                + segment_to_detour 
+                                + segment_back[1:] 
+                                + path[mid_idx+2:]
+                            )
+
+            individual_data[robot.robot_id] = path
+
+        repaired_data = self.repair_individual(individual_data)
+        print( "Initial Individual Paths:", repaired_data)
+        return creator.Individual(repaired_data)
+
+
     def custom_tournament_selection(self, individuals, k, tournsize=3):
+        """ Feasible solutions (0 conflicts) always beat infeasible. Among feasible, pick best fitness. """
         selected = []
         for _ in range(k):
             aspirants = random.sample(individuals, tournsize)
-            best = None
-            for ind in aspirants:
-                # Evaluate conflicts & fitness
-                c = len(self._detect_conflicts(ind))
-                f = ind.fitness.values[0]
-
-                if best is None:
-                    best = ind
-                    best_conflicts = c
-                    best_fitness = f
-                else:
-                    if c == 0 and best_conflicts > 0:
-                        best = ind
-                        best_conflicts = c
-                        best_fitness = f
-                    elif c == 0 and best_conflicts == 0:
-                        if f < best_fitness:
-                            best = ind
-                            best_conflicts = c
-                            best_fitness = f
-                    elif c < best_conflicts: 
-                        best = ind
-                        best_conflicts = c
-                        best_fitness = f
-                    elif c == best_conflicts and f < best_fitness:
-                        best = ind
-                        best_conflicts = c
-                        best_fitness = f
-
+            best = aspirants[0]
+            for contender in aspirants[1:]:
+                # Evaluate conflict counts:
+                best_conflicts = len(self._detect_conflicts(best))
+                contender_conflicts = len(self._detect_conflicts(contender))
+                if (contender_conflicts == 0 and best_conflicts > 0):
+                    best = contender
+                elif (contender_conflicts == 0 and best_conflicts == 0):
+                    if contender.fitness.values[0] < best.fitness.values[0]:
+                        best = contender
+                elif (contender_conflicts > 0 and best_conflicts > 0):
+                    # among infeasible, pick fewer conflicts, then better fitness
+                    if contender_conflicts < best_conflicts:
+                        best = contender
+                    elif contender_conflicts == best_conflicts and contender.fitness.values[0] < best.fitness.values[0]:
+                        best = contender
             selected.append(best)
         return selected
 
-        
-
-    def generate_individual(self):
-        """
-        Generates a single individual (potential solution).
-        Each robot gets a path generated using a heuristic on a randomly weighted graph.
-        The individual is then repaired to ensure basic validity AND resolve conflicts.
-        """
-
-        methods = [self.heuristic_path, self.random_path]
-        individual_data = {}
-        temp_graph = self.randomize_graph_weights()
-        for robot in self.robots:
-            method = random.choice(methods)
-            raw_path = method(robot, temp_graph)
-            individual_data[robot.robot_id] = raw_path
-
-        # Repair ensures connectivity, target inclusion, AND resolves conflicts
-        repaired_individual_data = self.repair_individual(individual_data)
-        #print("Individual generated and repaired", individual_data)
-        return creator.Individual(repaired_individual_data)
 
     def _calculate_penalty_base(self):
         """Calculate penalty base as 100x the maximum possible path cost"""
@@ -231,13 +225,36 @@ class PathBasedEA_DEAP():
         conflicts = self._detect_conflicts(individual)
         conflict_count = len(conflicts)
 
-        if conflict_count == 0:
-            return (total_distance,)
-        else:
-            penalty = self.CONFLICT_PENALTY_BASE * (conflict_count)
-            return (total_distance + penalty,)
+        # Weighted approach:
+        conflict_penalty = self.CONFLICT_BASE * conflict_count
+        fitness_value = total_distance + conflict_penalty
 
+        return (fitness_value,)
+
+    """def evaluate_fitness(self, individual):
+        total_distance = sum(len(p) - 1 for p in individual.values() if p)
+        conflicts = self._detect_conflicts(individual)
+        conflict_count = len(conflicts)
+        individual.conflict_count = conflict_count
+       
+        return (total_distance,)"""
     
+    def evaluate_fitness(self, individual):
+        total_distance = sum(len(p) - 1 for p in individual.values() if p)
+        conflicts = self._detect_conflicts(individual)
+        conflict_count = len(conflicts)
+        
+        # A small base penalty for each conflict, plus a modest multiplier
+        conflict_penalty = 50 * conflict_count
+        
+        # Alternatively, incorporate conflict "severity" 
+        # e.g. each conflict involving time step t can add (some function of t) to the penalty
+
+        fitness_value = total_distance + conflict_penalty
+        
+        return (fitness_value,)
+
+
     def _detect_conflicts(self, individual):
         """
         Helper function to detect vertex and edge conflicts in a set of paths.
@@ -381,7 +398,7 @@ class PathBasedEA_DEAP():
              return creator.Individual(self.repair_individual(mutant_data)), # Return repaired original
 
         # Choose a mutation type
-        mutation_type = random.choice(['insert_vertex', 'delete_vertex'])
+        mutation_type = random.choice(['rewire', 'insert_vertex', 'delete_vertex'])
 
         try:
             if mutation_type == 'rewire' and len(path) >= 3:
@@ -437,8 +454,8 @@ class PathBasedEA_DEAP():
                 else:
                     # If all neighbors failed, just remove the node_to_delete outright
                     mutated_path = path[:delete_idx] + path[delete_idx + 1:]
-                    mutant_data[robot_id_to_mutate] = mutated_path
-
+                    mutant_data[robot_id_to_mutate] = mutated_path\
+                
             else: # If conditions for rewire/delete aren't met, or invalid type somehow
                  mutated_path = path # No change
                  mutant_data[robot_id_to_mutate] = mutated_path
@@ -576,7 +593,7 @@ class PathBasedEA_DEAP():
 
         print("-" * 30)
         print(f"Best Individual Fitness (Cost): {best_fitness}")
-        if best_fitness >= self.CONFLICT_PENALTY_BASE:
+        if best_fitness >= self.CONFLICT_PENALTY:
              print("Warning: Best solution found still contains conflicts!")
              num_conflicts = self._detect_conflicts(best_individual)
              print(f"Number of conflicts in best solution: {len(num_conflicts)}")
