@@ -1,13 +1,15 @@
 import networkx as nx
-from utils import load_map
-
 
 def manhattan_distance(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 class MapfGraph:
-    def __init__(self, map_file):
-        self.grid, self.width, self.height = load_map(map_file)
+    def __init__(self, dimensions, obstacles):
+        self.height, self.width = dimensions
+        self.obstacles = set(map(tuple, obstacles))
+        self.grid = [['.' for _ in range(self.width)] for _ in range(self.height)]
+        for x, y in self.obstacles:
+            self.grid[y][x] = '@'  # Match format of old ASCII maps
         self.G = nx.Graph()
         self.build_graph()
 
@@ -27,13 +29,13 @@ class MapfGraph:
 
     def shortest_path(self, start, goal):
         try:
-            return nx.astar_path(self.G, source=start, target=goal, heuristic=manhattan_distance)
+            return nx.astar_path(self.G, source=tuple(start), target=tuple(goal), heuristic=manhattan_distance)
         except nx.NetworkXNoPath:
             return []
 
     def shortest_path_length(self, start, goal):
         try:
-            return nx.astar_path_length(self.G, source=start, target=goal, heuristic=manhattan_distance)
+            return nx.astar_path_length(self.G, source=tuple(start), target=tuple(goal), heuristic=manhattan_distance)
         except nx.NetworkXNoPath:
             return float('inf')
 

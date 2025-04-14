@@ -4,7 +4,9 @@ from robot import Robot
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
+from map_graph import MapfGraph
 import networkx as nx
+import yaml
 
 def load_map(map_file):
     with open(map_file, 'r') as f:
@@ -177,6 +179,22 @@ def load_scenario(output_scenario_file):
 
     return robot_list
 
+def load_map_and_robots(yaml_file_path: str):
+    with open(yaml_file_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    dimensions = tuple(data['map']['dimensions'])
+    obstacles = [tuple(reversed(o)) for o in data['map'].get('obstacles', [])]
+    graph = MapfGraph(dimensions, obstacles)
+
+    robots = []
+    for idx, agent in enumerate(data['agents']):
+        start = tuple(reversed(agent['start']))  # flip [row, col] → (col, row)
+        goals = [tuple(reversed(g)) for g in agent['goals']]
+        robots.append(Robot(robot_id=idx, start=start, targets=goals, priority=idx))
+
+    return graph, robots
+
 
 def expand_solution_paths(graph, solution):
     """Ensure each step between positions is one cell apart."""
@@ -192,81 +210,90 @@ def expand_solution_paths(graph, solution):
     return expanded
 
 def visualize_solution(graph, robots, solution, frame_interval=500):
-        fig, ax = plt.subplots(figsize=(8, 8))
-        ax.set_xticks(np.arange(graph.width))
-        ax.set_yticks(np.arange(graph.height))
-        ax.set_xticks(np.arange(-0.5, graph.width, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, graph.height, 1), minor=True)
-        ax.grid(which='minor', color='lightgray', linestyle='--', linewidth=0.5)
-        ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_xticks(np.arange(graph.width))
+    ax.set_yticks(np.arange(graph.height))
+    ax.set_xticks(np.arange(-0.5, graph.width, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, graph.height, 1), minor=True)
+    ax.grid(which='minor', color='lightgray', linestyle='--', linewidth=0.5)
+    ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
 
-        # Draw static walls
-        grid_display = np.zeros((graph.height, graph.width))
-        for y in range(graph.height):
-            for x in range(graph.width):
-                if graph.grid[y][x] == '@':
-                    grid_display[y, x] = 1
-        ax.imshow(grid_display, cmap="Greys", origin="upper")
+    # Draw static walls
+    grid_display = np.zeros((graph.height, graph.width))
+    for y in range(graph.height):
+        for x in range(graph.width):
+            if graph.grid[y][x] == '@':
+                grid_display[y, x] = 1
+    ax.imshow(grid_display, cmap="Greys", origin="upper")
 
-        # Prepare colors
-        colors = plt.cm.get_cmap("tab10", len(robots))
-        robot_circles = {}
-        robot_paths = {}
-        target_patches = {}
+    # Prepare colors
+    colors = plt.cm.get_cmap("tab10", len(robots))
+    robot_circles = {}
+    robot_paths = {}
+    target_markers = {}
+    robot_targets = {r.robot_id: list(reversed(r.targets)) for r in robots}  # reverse for popping
+
+    for robot in robots:
+        color = colors(robot.robot_id % 10)
+        circle = plt.Circle((0, 0), 0.3, color=color, zorder=3)
+        ax.add_patch(circle)
+        robot_circles[robot.robot_id] = circle
+        robot_paths[robot.robot_id] = solution[robot.robot_id]
+
+        # Plot only the first goal
+        if robot_targets[robot.robot_id]:
+            tx, ty = robot_targets[robot.robot_id][-1]
+            marker, = ax.plot(tx, ty, 'X', color=color, markersize=15, zorder=2)
+            target_markers[robot.robot_id] = ((tx, ty), marker)
+
+    max_frames = max(len(p) for p in robot_paths.values())
+
+    def interpolate(p0, p1, alpha):
+        return (1 - alpha) * p0[0] + alpha * p1[0], (1 - alpha) * p0[1] + alpha * p1[1]
+
+    def update(frame):
+        alpha = frame % 10 / 10.0
+        tick = frame // 10
 
         for robot in robots:
-            color = colors(robot.robot_id % 10)
-            circle = plt.Circle((0, 0), 0.3, color=color, zorder=3)
-            ax.add_patch(circle)
-            robot_circles[robot.robot_id] = circle
-            robot_paths[robot.robot_id] = solution[robot.robot_id]
+            rid = robot.robot_id
+            path = robot_paths[rid]
+            if tick < len(path) - 1:
+                pos1, pos2 = path[tick], path[tick + 1]
+                x, y = interpolate(pos1, pos2, alpha)
+                robot_circles[rid].center = (x, y)
+            elif tick < len(path):
+                robot_circles[rid].center = path[tick]
 
-            # Plot targets
-            for tx, ty in robot.targets:
-                marker, = ax.plot(tx, ty, 'X', color=color, markersize=15, zorder=2)
-                target_patches.setdefault(robot.robot_id, []).append(((tx, ty), marker))
+            # Handle goal marker display logic
+            if tick < len(path):
+                pos = path[tick]
+                current_target, marker = target_markers.get(rid, (None, None))
+                if current_target == pos:
+                    if marker:
+                        marker.remove()
+                    robot_targets[rid].pop()  # Remove current target
+                    if robot_targets[rid]:
+                        new_target = robot_targets[rid][-1]
+                        tx, ty = new_target
+                        new_marker, = ax.plot(tx, ty, 'X', color=colors(rid % 10), markersize=15, zorder=2)
+                        target_markers[rid] = (new_target, new_marker)
+                    else:
+                        target_markers[rid] = (None, None)
 
-        max_frames = max(len(p) for p in robot_paths.values())
+        # Return all drawable elements
+        return list(robot_circles.values()) + [m[1] for m in target_markers.values() if m[1] is not None]
 
-        def interpolate(p0, p1, alpha):
-            return (1 - alpha) * p0[0] + alpha * p1[0], (1 - alpha) * p0[1] + alpha * p1[1]
+    ani = animation.FuncAnimation(
+        fig, update, frames=max_frames * 10, interval=frame_interval // 10, blit=True
+    )
 
-        def update(frame):
-            alpha = frame % 10 / 10.0
-            tick = frame // 10
-
-            for robot in robots:
-                path = robot_paths[robot.robot_id]
-                if tick < len(path) - 1:
-                    pos1, pos2 = path[tick], path[tick + 1]
-                    x, y = interpolate(pos1, pos2, alpha)
-                    robot_circles[robot.robot_id].center = (x, y)
-                elif tick < len(path):
-                    robot_circles[robot.robot_id].center = path[tick]
-
-                # Hide reached targets
-                if tick < len(path):
-                    pos = path[tick]
-                    remaining = []
-                    for (tx, ty), patch in target_patches.get(robot.robot_id, []):
-                        if (tx, ty) != pos:
-                            remaining.append(((tx, ty), patch))
-                        else:
-                            patch.remove()
-                    target_patches[robot.robot_id] = remaining
-
-            return list(robot_circles.values())
-
-        ani = animation.FuncAnimation(
-            fig, update, frames=max_frames * 10, interval=frame_interval // 10, blit=True
-        )
-
-        ax.set_title("Smooth Multi-Agent Path Planning Visualization")
-        ax.set_xlim(-0.5, graph.width - 0.5)
-        ax.set_ylim(-0.5, graph.height - 0.5)
-        ax.set_aspect('equal')
-        ax.invert_yaxis()
-        plt.show()
+    ax.set_title("Smooth Multi-Agent Path Planning Visualization")
+    ax.set_xlim(-0.5, graph.width - 0.5)
+    ax.set_ylim(-0.5, graph.height - 0.5)
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    plt.show()
 
 def show_graph_structure(graph):
     """
