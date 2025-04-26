@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import matplotlib.ticker as mticker
+from matplotlib import animation
 
 def plot_ea_metrics(generations, fitness_history, makespan_history, conflict_history, distance_history):
     sns.set(style="whitegrid")
@@ -244,3 +245,55 @@ def plot_deap_statistics_multi(self):
             plt.show()
         else:
             print("No non-dominated solutions found in the Hall of Fame.")
+
+def show_statistics(best_hist, avg_hist, conf_hist,
+                       title="P3 Fitness Statistics", y_label="Fitness (Cost)"):
+    """Replicates the look of your DEAP‐style plot for P3 arrays."""
+    import matplotlib.ticker as mticker
+    if not best_hist:
+        print("No statistics to plot.")
+        return
+    gens = range(len(best_hist))
+    plt.figure(figsize=(12,6))
+    import seaborn as sns; sns.set(style="whitegrid")
+
+    # Worst ≈ max fitness per generation (can be reconstructed)
+    plt.plot(gens, best_hist,  label="Best Fitness",  linestyle='-', color='forestgreen', linewidth=1.5)
+    plt.plot(gens, avg_hist,   label="Mean Fitness",  linestyle='--',color='royalblue', linewidth=1.5)
+
+    # Conflicts on secondary axis
+    ax1 = plt.gca(); ax2 = ax1.twinx()
+    ax2.plot(gens, conf_hist, color='red', label='Avg Conflicts', linewidth=1.2)
+    ax2.set_ylabel('# Conflicts', color='red'); ax2.tick_params(axis='y', colors='red')
+
+    ax1.set_xlabel('Generation'); ax1.set_ylabel(y_label)
+    ax1.set_title(title)
+    ax1.yaxis.set_major_formatter(mticker.StrMethodFormatter('{x:.2f}'))
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1+lines2, labels1+labels2, loc='upper right')
+    plt.tight_layout(); plt.show()
+
+
+def animate_solution(graph, robots, paths):
+    fig, ax = plt.subplots(figsize=(6,6))
+    ax.set_xlim(-0.5, graph.width-0.5); ax.set_ylim(-0.5, graph.height-0.5)
+    ax.set_aspect('equal'); ax.invert_yaxis(); ax.axis('off')
+    # obstacles
+    for (x,y) in graph.obstacles:
+        ax.add_patch(plt.Rectangle((x-0.5,y-0.5),1,1, color='black'))
+    colors = plt.cm.tab10(range(len(robots)))
+    circles = {}
+    for r, col in zip(robots, colors):
+        c = plt.Circle(r.start, 0.3, color=col, zorder=3)
+        ax.add_patch(c); circles[r.robot_id] = c
+    max_t = max(len(p) for p in paths.values())
+    def update(frame):
+        for r in robots:
+            p = paths[r.robot_id]
+            pos = p[frame] if frame < len(p) else p[-1]
+            circles[r.robot_id].center = pos
+        return circles.values()
+    ani = animation.FuncAnimation(fig, update, frames=max_t, interval=250, blit=True)
+    plt.show()

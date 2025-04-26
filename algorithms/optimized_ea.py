@@ -49,8 +49,8 @@ class PathBasedEA_DEAP():
         self.toolbox.register("evaluate", self.evaluate_fitness) # Renamed for clarity
         self.toolbox.register("mate", self.crossover)
         self.toolbox.register("mutate", self.mutation)
-        #self.toolbox.register("select", tools.selRoulette)
-        self.toolbox.register("select", lambda inds, k: self.custom_tournament_selection(inds, k, tournsize=3))
+        self.toolbox.register("select", tools.selRoulette)
+        #self.toolbox.register("select", lambda inds, k: self.custom_tournament_selection(inds, k, tournsize=3))
 
     
     def custom_tournament_selection(self, individuals, k, tournsize=3):
@@ -253,7 +253,7 @@ class PathBasedEA_DEAP():
         max_steps = 0
         for path in individual.values():
             if path:
-                max_steps = max(max_steps, len(path))
+                max_steps = max(max_steps, len(path))+66
 
         if max_steps == 0: # Handle empty individual case
              return []
@@ -381,7 +381,7 @@ class PathBasedEA_DEAP():
              return creator.Individual(self.repair_individual(mutant_data)), # Return repaired original
 
         # Choose a mutation type
-        mutation_type = random.choice(['insert_vertex', 'delete_vertex'])
+        mutation_type = random.choice(['rewire','insert_vertex', 'delete_vertex'])
 
         try:
             if mutation_type == 'rewire' and len(path) >= 3:
@@ -421,8 +421,6 @@ class PathBasedEA_DEAP():
                         # Path from neighbor -> next_node
                         path_from_neighbor = self.graph.shortest_path(neighbor, next_node)
 
-                        # -- Merge subpaths WITHOUT excluding duplicates --
-                        # This means if path_to_neighbor[-1] == path_from_neighbor[0],
                         # we keep both nodes, effectively inserting a "wait" step.
                         patched_path = path_to_neighbor + path_from_neighbor  
 

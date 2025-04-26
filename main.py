@@ -1,10 +1,8 @@
 import yaml
 from utils import *
-from algorithms.optimized_ea_non_deap import PathBasedEA
-from algorithms.ea_optimized import PathBasedEA_DEAP
-#from algorithms.optimized_ea import PathBasedEA_DEAP
-from algorithms.optimized_ea_multi  import PathBasedEA_DEAP_MULTI
-from algorithms.feasible_only import PathBasedEA_DEAP_FeasibleOnly
+from algorithms.p3 import P3
+from algorithms.p3_2 import P3_2
+from algorithms.optimized_ea import PathBasedEA_DEAP
 from map_graph import MapfGraph
 from plot import *
 import numpy as np
@@ -120,9 +118,51 @@ def run_deap_ea():
     plot_deap_statistics(logbook)
 #    plot_analysis(analysis)
 
+def run_p3():
+    config = load_config()
+
+    # Load agents and map
+    graph, robots = load_map_and_robots(config['scenario_file'])
+    print(robots)
+
+    #show_graph_structure(graph)
+    #show_graph_with_robots(graph, robots)
+
+    # Plug in any algorithm here
+    p3 = P3(graph, 
+             robots, 
+             config['ea_params']['num_generations'])
+
+    best, cost = p3.run()
+    print("Best fitness", cost)
+    show_statistics(p3.best_hist, p3.avg_hist, p3.conf_hist)
+    visualize_solution(graph, robots, best)
+
+def run_p3_2():
+    config = load_config()
+
+    # Load agents and map
+    graph, robots = load_map_and_robots(config['scenario_file'])
+    print(robots)
+
+    #show_graph_structure(graph)
+    #show_graph_with_robots(graph, robots)
+
+    # Plug in any algorithm here
+    p3_2 = P3_2(graph, 
+             robots, 
+             config['ea_params']['num_generations'])
+
+    best, best_history, avg_history, conf_history = p3_2.run()
+    print("Best fitness", best)
+    show_statistics(best_history, avg_history, conf_history)
+    visualize_solution(graph, robots, best)
+
 def main():
     #run_feasibile_only_ea()
-    run_deap_ea()
+    #run_deap_ea()
+    #run_p3()
+    run_p3_2()
     #run_non_deap_ea()
     #run_deap_ea_multi()
     

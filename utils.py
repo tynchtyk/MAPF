@@ -196,6 +196,7 @@ def load_map_and_robots(yaml_file_path: str):
     return graph, robots
 
 
+
 def expand_solution_paths(graph, solution):
     """Ensure each step between positions is one cell apart."""
     expanded = {}
@@ -210,6 +211,7 @@ def expand_solution_paths(graph, solution):
     return expanded
 
 def visualize_solution(graph, robots, solution, frame_interval=500):
+    plt.close('all')
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_xticks(np.arange(graph.width))
     ax.set_yticks(np.arange(graph.height))

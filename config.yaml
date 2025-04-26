@@ -10,8 +10,10 @@
 #generated_scenario_file: datasets/maze_32x32/generated-scen/maze-32-32-4-even-1.scen
 
 #scenario_file: dataset/3x3_2.yaml
-#scenario_file: dataset/2x5_2.yaml
-scenario_file: dataset/exp1_efficiency/maze-32-32-4/2_12_0.yaml
+#scenario_file: dataset/8x8_4.yaml
+scenario_file: dataset/2x5_2.yaml
+#scenario_file: dataset/exp1_efficiency/maze-32-32-4/2_12_0.yaml
+#scenario_file: dataset/lak303d/4_12_1.yaml
 
 ea_params:
   crossover_rate: 0.6
