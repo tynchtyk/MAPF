@@ -210,6 +210,10 @@ def expand_solution_paths(graph, solution):
         expanded[robot_id] = full_path
     return expanded
 
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
 def visualize_solution(graph, robots, solution, frame_interval=500):
     plt.close('all')
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -232,9 +236,7 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
     colors = plt.cm.get_cmap("tab10", len(robots))
     robot_circles = {}
     robot_paths = {}
-    target_markers = {}
-    robot_targets = {r.robot_id: list(reversed(r.targets)) for r in robots}  # reverse for popping
-
+    initial_marker_states = {}
     for robot in robots:
         color = colors(robot.robot_id % 10)
         circle = plt.Circle((0, 0), 0.3, color=color, zorder=3)
@@ -242,24 +244,36 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
         robot_circles[robot.robot_id] = circle
         robot_paths[robot.robot_id] = solution[robot.robot_id]
 
-        # Plot only the first goal
-        if robot_targets[robot.robot_id]:
-            tx, ty = robot_targets[robot.robot_id][-1]
+        initial_marker_states[robot.robot_id] = []
+        for tx, ty in reversed(robot.targets):
             marker, = ax.plot(tx, ty, 'X', color=color, markersize=15, zorder=2)
-            target_markers[robot.robot_id] = ((tx, ty), marker)
+            initial_marker_states[robot.robot_id].append({'pos': (tx, ty), 'marker': marker, 'visible': True})
+
+    marker_states = {rid: [dict(state) for state in states] for rid, states in initial_marker_states.items()}
 
     max_frames = max(len(p) for p in robot_paths.values())
 
     def interpolate(p0, p1, alpha):
         return (1 - alpha) * p0[0] + alpha * p1[0], (1 - alpha) * p0[1] + alpha * p1[1]
 
+    def reset_markers():
+        for rid, states in initial_marker_states.items():
+            for i, state in enumerate(states):
+                marker_states[rid][i]['visible'] = True
+                marker_states[rid][i]['marker'].set_visible(True)
+
     def update(frame):
+        if frame == 0:
+            reset_markers()
+
         alpha = frame % 10 / 10.0
         tick = frame // 10
 
         for robot in robots:
             rid = robot.robot_id
             path = robot_paths[rid]
+
+            # Move robot
             if tick < len(path) - 1:
                 pos1, pos2 = path[tick], path[tick + 1]
                 x, y = interpolate(pos1, pos2, alpha)
@@ -267,27 +281,20 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
             elif tick < len(path):
                 robot_circles[rid].center = path[tick]
 
-            # Handle goal marker display logic
-            if tick < len(path):
-                pos = path[tick]
-                current_target, marker = target_markers.get(rid, (None, None))
-                if current_target == pos:
-                    if marker:
-                        marker.remove()
-                    robot_targets[rid].pop()  # Remove current target
-                    if robot_targets[rid]:
-                        new_target = robot_targets[rid][-1]
-                        tx, ty = new_target
-                        new_marker, = ax.plot(tx, ty, 'X', color=colors(rid % 10), markersize=15, zorder=2)
-                        target_markers[rid] = (new_target, new_marker)
-                    else:
-                        target_markers[rid] = (None, None)
+            # Update marker visibility
+            for state in marker_states[rid]:
+                if tick < len(path) and path[tick] == state['pos']:
+                    state['visible'] = False
+                state['marker'].set_visible(state['visible'])
 
-        # Return all drawable elements
-        return list(robot_circles.values()) + [m[1] for m in target_markers.values() if m[1] is not None]
+        elements = list(robot_circles.values())
+        for states in marker_states.values():
+            elements += [s['marker'] for s in states if s['visible']]
+
+        return elements
 
     ani = animation.FuncAnimation(
-        fig, update, frames=max_frames * 10, interval=frame_interval // 10, blit=True
+        fig, update, frames=max_frames * 10, interval=frame_interval // 10, blit=True, repeat=True
     )
 
     ax.set_title("Smooth Multi-Agent Path Planning Visualization")
@@ -296,6 +303,7 @@ def visualize_solution(graph, robots, solution, frame_interval=500):
     ax.set_aspect('equal')
     ax.invert_yaxis()
     plt.show()
+
 
 def show_graph_structure(graph):
     """

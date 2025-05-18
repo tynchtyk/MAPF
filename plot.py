@@ -3,6 +3,7 @@ import seaborn as sns
 import numpy as np
 import matplotlib.ticker as mticker
 from matplotlib import animation
+from algorithms.ga import TimeLogger
 
 def plot_ea_metrics(generations, fitness_history, makespan_history, conflict_history, distance_history):
     sns.set(style="whitegrid")
@@ -274,6 +275,127 @@ def show_statistics(best_hist, avg_hist, conf_hist,
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1+lines2, labels1+labels2, loc='upper right')
     plt.tight_layout(); plt.show()
+
+def plot_time_log(logger: TimeLogger):
+    names = []
+    totals = []
+    avgs = []
+    counts = []
+
+    for name, data in logger.records.items():
+        names.append(name)
+        totals.append(data["total_time"])
+        counts.append(data["count"])
+        avgs.append(data["total_time"] / data["count"])
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
+
+    # --- Total Time Plot ---
+    axs[0].barh(names, totals, color='skyblue', edgecolor='black')
+    axs[0].set_title("Total Time (s)", fontsize=14, fontweight='bold')
+    axs[0].set_xlabel("Seconds", fontsize=12)
+    axs[0].grid(axis='x', linestyle='--', alpha=0.7)
+
+    # --- Average Time Plot ---
+    axs[1].barh(names, avgs, color='lightgreen', edgecolor='black')
+    axs[1].set_title("Average Time per Call (s)", fontsize=14, fontweight='bold')
+    axs[1].set_xlabel("Seconds", fontsize=12)
+    axs[1].grid(axis='x', linestyle='--', alpha=0.7)
+
+    # --- Call Count Plot ---
+    axs[2].barh(names, counts, color='lightcoral', edgecolor='black')
+    axs[2].set_title("Number of Calls", fontsize=14, fontweight='bold')
+    axs[2].set_xlabel("Calls", fontsize=12)
+    axs[2].grid(axis='x', linestyle='--', alpha=0.7)
+
+    # --- Overall Layout ---
+    plt.suptitle("Function Execution Time Analysis", fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
+def plot_runtime_comparison(times_p3, times_p3_cdgx, times_p3_dsm, label1="P3_Base", label2="P3_CDGX", label3="P3_DSM"):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    sns.set(style="whitegrid")
+
+    seeds = np.arange(1, len(times_p3) + 1)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(seeds, times_p3,   label=label1, marker='o', linewidth=2, color='forestgreen')
+    plt.plot(seeds, times_p3_cdgx, label=label2, marker='s', linewidth=2, color='darkorange')
+    plt.plot(seeds, times_p3_dsm, label=label3, marker='p', linewidth=3, color='royalblue')
+
+    plt.xlabel("Seed #")
+    plt.ylabel("Runtime (seconds)")
+    plt.title("Runtime per Run")
+    plt.legend()
+    plt.grid(True, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    plt.show()
+
+def show_statistics_mean_std(all1, all2, all3,
+    label1="P3_Base", label2="P3_DSM_ROBOT_CONFLICTS", label3="P3_DSM_HYBRID",
+    title="Mean Best Fitness per Generation",
+    color1="forestgreen", color2="darkorange", color3="royalblue",
+    save_path=None
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    sns.set(style="whitegrid", font_scale=1.2)
+
+    def pad_histories(histories, idx):
+        L = max(len(h[idx]) for h in histories)
+        return np.array([h[idx] + [h[idx][-1]] * (L - len(h[idx])) for h in histories])
+
+    # Expect each item in all1, all2 to be a tuple: (best_history, avg_history, conf_history)
+    best1 = pad_histories(all1, 0)
+    avg1  = pad_histories(all1, 1)
+
+    best2 = pad_histories(all2, 0)
+    avg2  = pad_histories(all2, 1)
+
+    best3 = pad_histories(all3, 0)
+    avg3  = pad_histories(all3, 1)
+
+    gens = range(best1.shape[1])
+
+    mean_best1 = best1.mean(axis=0)
+    mean_avg1  = avg1.mean(axis=0)
+
+    mean_best2 = best2.mean(axis=0)
+    mean_avg2  = avg2.mean(axis=0)
+
+    mean_best3 = best3.mean(axis=0)
+    mean_avg3  = avg3.mean(axis=0)
+
+    print("Algo 1: ", avg1)
+    print("Algo 2: ", avg2)
+    print("Algo 3: ", avg3)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(gens, mean_best1, label=f"{label1} (Best)", color=color1, linewidth=2)
+    plt.plot(gens, mean_avg1, label=f"{label1} (Avg)", linestyle="--", color=color1, linewidth=2)
+
+    plt.plot(gens, mean_best2, label=f"{label2} (Best)", color=color2, linewidth=2)
+    plt.plot(gens, mean_avg2, label=f"{label2} (Avg)", linestyle="--", color=color2, linewidth=2)
+
+    plt.plot(gens, mean_best3, label=f"{label3} (Best)", color=color3, linewidth=3)
+    plt.plot(gens, mean_avg3, label=f"{label3} (Avg)", linestyle="--", color=color3, linewidth=2)
+
+    plt.xlabel("Generation")
+    plt.ylabel("Fitness (Lower is Better)")
+    plt.title(title)
+    plt.legend(loc="upper right")
+    plt.grid(True, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        print(f"Plot saved to {save_path}")
+    plt.show()
+
 
 
 def animate_solution(graph, robots, paths):
