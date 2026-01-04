@@ -1,377 +1,317 @@
-# ================= batch_benchmark.py =============================
-import argparse, glob, os, time, random, statistics, pathlib
+import glob
+import os
+import pathlib
+import random
+import statistics
+import multiprocessing as mp
+import time
+import traceback
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns; sns.set(style="whitegrid", font_scale=1.3)
 import yaml
-from utils import *
-from algorithms.p3_dsm import P3_DSM
+
+# --- Algorithm Imports ---
 from algorithms.p3_dsm_hybrid import P3_DSM_HYBRID
-from algorithms.p3_dsm_robot_conflicts import P3_DSM_ROBOT_CONFLICRS
+from algorithms.p3_dsm_robot_conflicts import P3_DSM_ROBOT_CONFLICTS
 from algorithms.p3_base import P3_Base
-from algorithms.p3_cdgx import P3_CDGX
-#from algorithms.optimized_ea import PathBasedEA_DEAP
-from map_graph import MapfGraph
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
 
-# -----------------------------------------------------------------
-# User-editable parameters
-# -----------------------------------------------------------------
-N_SEEDS         = 1           # independent runs per scenario / algorithm
-NUM_GENERATIONS = 20          # can be read from your YAML config instead
-OUT_CSV         = "benchmark_raw.csv"
-OUT_FIG         = "summary_cost.png"
-# -----------------------------------------------------------------
+# --- Utility Imports ---
+from utils.utils import load_map_and_robots
 
-# -------------- Your existing helpers ----------------------------
-# Assume these are already imported from your framework
-# from your_module import load_map_and_robots, P3, P3_2, show_statistics, ...
-# -----------------------------------------------------------------
+# --- Constants ---
+# Used ONLY if the algorithm code CRASHES (Exception raised)
+CRASH_PENALTY = 1_000_000_000.0 
 
-def load_config(path="config.yaml"):
-    with open(path, 'r') as file:
-        return yaml.safe_load(file)
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+
+# -------------------- Single-run execution (child process) --------------------
+
+def _run_task_payload(job: Tuple[Any, str, str, int, float, int, int]) -> Dict[str, Any]:
+    """
+    Runs ONE (scenario, algorithm, seed) and returns a standardized dict.
+    """
+    AlgClass, alg_name, scenario_file, seed, max_seconds, local_steps, patience = job
+
+    # deterministic randomness per run
+    random.seed(seed)
+    np.random.seed(seed)
+
+    graph, robots = load_map_and_robots(scenario_file)
+
+    ea = AlgClass(
+        graph,
+        robots,
+        local_steps=local_steps,
+        max_seconds=max_seconds,
+        patience=patience,
+    )
+
+    t0 = time.perf_counter()
+    try:
+        # 
+        # The algorithm is responsible for stopping itself via Soft Timeout.
+        best, stats = ea.run() 
+    except Exception as e:
+        # If we reach here, the algorithm code CRASHED (bug, memory, etc.)
+        # We MUST return something to keep the experiment running.
+        print(f"DEBUG: CRASH in {alg_name} {os.path.basename(scenario_file)}: {e}")
+        dt = time.perf_counter() - t0
+        return {
+            "scenario": os.path.basename(scenario_file),
+            "scenario_id": os.path.splitext(os.path.basename(scenario_file))[0],
+            "agents": len(robots),
+            "goals": float(statistics.mean(len(r.targets) for r in robots)) if robots else 0.0,
+            "alg": alg_name,
+            "seed": seed,
+            "cost": CRASH_PENALTY,  # Only used on CRASH
+            "conflicts": -1,
+            "success": 0,
+            "runtime": dt,
+            "external_runtime": dt,
+        }
+
+    dt = time.perf_counter() - t0
+
+    # --- Derived metrics ---
+    if best:
+        distance = sum(max(0, len(p) - 1) for p in best.values())
+        makespan = max((max(0, len(p) - 1) for p in best.values()), default=0)
+    else:
+        distance = 0
+        makespan = 0
+
+    # Retrieve cost directly. 
+    # If the algorithm class was fixed correctly, this will NEVER be inf.
+    # If it IS inf, we leave it as inf (so you can see the bug in the algo).
+    final_cost = stats.get("cost", float('inf'))
     
-def run_one(AlgClass, scenario_file, seed):
-    random.seed(seed); np.random.seed(seed)
-    graph, robots = load_map_and_robots(scenario_file)
-    ea = AlgClass(graph, robots, NUM_GENERATIONS)
-    t0 = time.perf_counter()
-    ea.run()                                # returns paths & histories
-    dt = time.perf_counter() - t0
-    return dict(cost=ea.best_cost, runtime=dt)
+    # Fallback: If algo returned inf/missing, try to calc fitness now
+    if (final_cost == float('inf') or np.isinf(final_cost)) and best:
+        try:
+            final_cost = ea.fitness(best, modified_rids=None)
+        except:
+            pass # Keep it as inf/original value if calc fails
 
+    # Ensure conflicts/success exist
+    if "conflicts" not in stats:
+        try:
+            stats["conflicts"] = len(ea._detect_conflicts(best)) if best else -1
+        except Exception:
+            stats["conflicts"] = -1
 
-def robot_meta(robots):
-    n_agents = len(robots)
-    # assume each Robot object has .targets (list of goals)
-    goals_per = statistics.mean(len(r.targets) for r in robots) if robots else 0
-    return n_agents, goals_per
+    if "success" not in stats:
+        stats["success"] = 1 if stats.get("conflicts", -1) == 0 else 0
 
-
-def _run_task(args):
-    """Worker wrapper so ProcessPool can pickle the call"""
-    AlgClass, alg_name, scenario_file, seed, num_generations = args
-    # local imports inside the subprocess
-    import random, time, numpy as np
-    from utils import load_map_and_robots          # make sure resolvable
-    ea_args = dict(generations=num_generations)    # adapt if API differs
-
-    random.seed(seed); np.random.seed(seed)
-    graph, robots = load_map_and_robots(scenario_file)
-    ea = AlgClass(graph, robots, **ea_args)
-
-    t0 = time.perf_counter()
-    ea.run()
-    dt = time.perf_counter() - t0
-    return {
+    out = {
         "scenario": os.path.basename(scenario_file),
+        "scenario_id": os.path.splitext(os.path.basename(scenario_file))[0],
         "agents": len(robots),
-        "goals": statistics.mean(len(r.targets) for r in robots),
+        "goals": float(statistics.mean(len(r.targets) for r in robots)) if robots else 0.0,
         "alg": alg_name,
         "seed": seed,
-        "cost": ea.best_cost,
-        "distance": sum(len(p) for p in ea.best_individual.values()),
-        "conflicts": len(ea._detect_conflicts(ea.best_individual)),
-        "runtime": dt,
-        "generations": ea.generations,
+        "distance": distance,
+        "makespan": makespan,
+        "cost": final_cost, 
+        "external_runtime": dt,
+    }
+    
+    for k, v in stats.items():
+        if k != "cost":
+            out[k] = v
+    
+    return out
+
+
+def _worker_entry(result_queue: "mp.Queue", job: Tuple[Any, str, str, int, float, int, int]) -> None:
+    """
+    Always puts exactly one result into the queue.
+    """
+    try:
+        res = _run_task_payload(job)
+        result_queue.put(res)
+    except Exception as e:
+        AlgClass, alg_name, scenario_file, seed, _, _, _ = job
+        print(f"CRITICAL WORKER CRASH: {e}")
+        res = {
+            "scenario": os.path.basename(scenario_file),
+            "alg": alg_name,
+            "seed": seed,
+            "cost": CRASH_PENALTY,
+            "success": 0
+        }
+        result_queue.put(res)
+
+
+def run_one_safe(
+    ctx: mp.context.BaseContext,
+    job: Tuple[Any, str, str, int, float, int, int],
+) -> Dict[str, Any]:
+    """
+    Runs a single job in its own child process.
+    WAITS INDEFINITELY for the child to finish (No Hard Kill).
+    """
+    q = ctx.Queue()
+    p = ctx.Process(target=_worker_entry, args=(q, job))
+    p.start()
+    
+    # Wait indefinitely for the process to finish
+    p.join() 
+
+    if not q.empty():
+        return q.get()
+
+    AlgClass, alg_name, scenario_file, seed, max_seconds, local_steps, patience = job
+    return {
+        "scenario": os.path.basename(scenario_file),
+        "scenario_id": os.path.splitext(os.path.basename(scenario_file))[0],
+        "alg": alg_name,
+        "seed": seed,
+        "cost": CRASH_PENALTY,
+        "conflicts": -1,
+        "success": 0,
+        "runtime": -1.0,
+        "external_runtime": -1.0,
     }
 
-# ----------------------------------------------------------------
-# Parallel batch_folder
-# ----------------------------------------------------------------
-def batch_folder(folder):
-    scenario_files = sorted(glob.glob(os.path.join(folder, "*.*")))
-    scenario_files = [f for f in scenario_files
-                      if pathlib.Path(f).suffix.lower() in
-                         {".yaml", ".yml", ".json", ".txt"}]
+
+# -------------------- Global Worker Function --------------------
+
+def _pool_worker(ctx, job_queue, out_queue):
+    """
+    Consumes jobs from job_queue, runs them safely, puts results in out_queue.
+    """
+    while True:
+        job = job_queue.get()
+        if job is None:
+            break
+        try:
+            res = run_one_safe(ctx, job)
+        except Exception as e:
+            if job and len(job) >= 4:
+                _, alg_name, scenario_file, seed, _, _, _ = job
+                scen_name = os.path.basename(scenario_file)
+            else:
+                scen_name, alg_name, seed = "Unknown", "Unknown", -1
+
+            print(f"RUNNER EXCEPTION for {scen_name}: {e}")
+            res = {
+                "scenario": scen_name,
+                "alg": alg_name,
+                "seed": seed,
+                "cost": CRASH_PENALTY,
+                "success": 0
+            }
+        out_queue.put(res)
+
+
+# -------------------- Experiment runner --------------------
+
+def run_experiment(config: dict) -> pd.DataFrame:
+    ctx = mp.get_context("spawn")
+
+    scenario_folder = config["scenario_folder"]
+    scenario_files = sorted(glob.glob(os.path.join(scenario_folder, "*.*")))
+    scenario_files = [
+        f for f in scenario_files
+        if pathlib.Path(f).suffix.lower() in {".yaml", ".yml", ".json", ".txt"}
+    ]
     if not scenario_files:
-        raise RuntimeError("No scenario files found in the folder!")
+        raise RuntimeError(f"No scenario files found in {scenario_folder}")
 
-    seeds = list(range(N_SEEDS))
-    algs  = [("P3_BASE", P3_Base), ("P3_DSM", P3_DSM_ROBOT_CONFLICRS), ("P3_DSM_HYBRID", P3_DSM_HYBRID),]
+    seed_count = int(config["simulation_params"]["seed"])
+    seeds = list(range(seed_count))
 
-    # Build job list
-    jobs = []
-    cnt = 0
+    max_seconds = float(config["simulation_params"].get("max_seconds", 180.0))
+    local_steps = int(config["simulation_params"].get("local_steps", 5))
+    patience = int(config["simulation_params"].get("patience", 1000))
+
+    algs = [
+        ("Base", P3_Base),
+        ("RGCM", P3_DSM_ROBOT_CONFLICTS),
+        ("CHHM", P3_DSM_HYBRID),
+    ]
+
+    # Build jobs
+    jobs: List[Tuple[Any, str, str, int, float, int, int]] = []
     for scen in scenario_files:
-        #if scen[35] == '4':
-        for alg_name, Alg in algs:
-            for s in seeds:
-                jobs.append((Alg, alg_name, scen, s, NUM_GENERATIONS))
-        cnt += 1
+        for alg_name, AlgClass in algs:
+            for seed in seeds:
+                jobs.append((AlgClass, alg_name, scen, seed, max_seconds, local_steps, patience))
 
-    # Run in parallel
-    results = []
-    max_workers = min(multiprocessing.cpu_count(), len(jobs))
-    print(f"Running {len(jobs)} tasks on {max_workers} processes …")
+    total = len(jobs)
+    print(f"Running {total} tasks (max_seconds={max_seconds:.0f}s)...")
+    print("Hard Timeouts: DISABLED (Waiting for completion)")
 
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        fut2job = {pool.submit(_run_task, job): job for job in jobs}
-        for fut in as_completed(fut2job):
-            res = fut.result()
+    max_workers = int(config["simulation_params"].get("parallel_workers", 8))
+    print(f"Parallel workers: {max_workers}")
+
+    job_queue = ctx.Queue()
+    out_queue = ctx.Queue()
+
+    for job in jobs:
+        job_queue.put(job)
+    for _ in range(max_workers):
+        job_queue.put(None)
+
+    # Start workers
+    workers = [ctx.Process(target=_pool_worker, args=(ctx, job_queue, out_queue)) for _ in range(max_workers)]
+    for w in workers:
+        w.start()
+
+    results: List[Dict[str, Any]] = []
+    completed = 0
+
+    while completed < total:
+        try:
+            res = out_queue.get()
             results.append(res)
-            print(f"✔ {res['scenario']:30s} | {res['alg']:7s} "
-                  f"seed={res['seed']:<2}  cost={res['cost']:.1f} "
-                  f"time={res['runtime']:.2f}s")
+            completed += 1
 
-    return pd.DataFrame(results)
+            scen = res.get("scenario", "?")
+            alg = res.get("alg", "?")
+            seed = res.get("seed", -1)
+            cost = res.get("cost", float('inf'))
+            succ = res.get("success", 0)
+            dt = res.get("external_runtime", 0.0)
+            status = "✔" if succ else "✘"
+            
+            # Display logic
+            if cost == CRASH_PENALTY:
+                cost_str = "CRASH"
+            elif cost == float('inf'):
+                cost_str = "inf"
+            else:
+                cost_str = f"{cost:.1f}"
 
+            print(f"[{completed:>4}/{total}] {status} {scen[:28]:28s} | {alg:5s} seed={seed:<2} cost={cost_str} t={dt:.2f}s")
 
-def plot_summary(df):
-    agg = (df.groupby(["scenario", "agents", "goals", "alg"])
-             .agg(cost_mean=("cost", "mean"),
-                  cost_sd  =("cost",  "std"),
-                  rt_mean  =("runtime","mean"))
-             .reset_index())
+        except Exception as e:
+            print(f"Error retrieving result from queue: {e}")
 
-    plt.figure(figsize=(11, 6))
-    ax = sns.scatterplot(data=agg,
-                         x="agents", y="cost_mean",
-                         hue="alg", style="goals", s=120)
-    for _, row in agg.iterrows():
-        ax.errorbar(row["agents"], row["cost_mean"],
-                    yerr=row["cost_sd"], fmt="none",
-                    ecolor="gray", alpha=0.4, capsize=3)
+    for w in workers:
+        w.join()
 
-    ax.set_xlabel("# robots"); ax.set_ylabel("Final cost (mean ± sd)")
-    ax.set_title("Scalability of P3 vs P3-LT on all scenarios")
-    ax.legend(title="Algorithm / goals")
-    plt.tight_layout(); plt.savefig(OUT_FIG, dpi=300)
-    plt.show()
-
-def plot_summary(df, metric="cost", savefile="summary_plot.png"):
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    assert metric in {"cost", "runtime"}
-
-    # Aggregate mean ± std
-    agg = (
-        df.groupby(["scenario", "agents", "goals", "alg"])
-          .agg(
-              value_mean=(metric, "mean"),
-              value_sd=(metric, "std")
-          )
-          .reset_index()
-    )
-
-    ylabel = "Final Cost" if metric == "cost" else "Runtime (s)"
-
-    g = sns.FacetGrid(
-        agg, col="scenario", col_wrap=3,
-        hue="alg", height=4, aspect=1.3,
-        palette="Set2", sharey=False
-    )
-
-    g.map_dataframe(sns.scatterplot,
-                    x="agents", y="value_mean",
-                    style="goals", s=100)
-
-    # Error bars
-    for ax, (_, sub) in zip(g.axes.flat, agg.groupby("scenario")):
-        for _, row in sub.iterrows():
-            ax.errorbar(row["agents"], row["value_mean"],
-                        yerr=row["value_sd"],
-                        fmt="none", capsize=3,
-                        alpha=0.4, ecolor="gray")
-
-    g.set_axis_labels("# Robots", ylabel)
-    g.add_legend(title="Algorithm / Goals")
-    g.fig.subplots_adjust(top=0.9)
-    g.fig.suptitle(f"{ylabel} Comparison per Scenario", fontsize=16)
-
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-def _prepare_results(df: pd.DataFrame):
-    """Prepare dataset: test_id, best_cost, rel_cost (no outlier removal)."""
-    df = df.copy()
-    df["test_id"] = df.groupby("scenario").ngroup() + 1
-    df["best_cost"] = df.groupby("scenario")["cost"].transform("min")
-    df["rel_cost"] = df["cost"] / df["best_cost"]
-    return dict(df=df)
+    # --- Clean up DataFrame before returning ---
+    df = pd.DataFrame(results)
+    if "error" in df.columns:
+        df = df.drop(columns=["error"])
+        
+    return df
 
 
-def plot_test_vs_fitness(df: pd.DataFrame, savefile: str = "fitness_vs_test.png"):
-    """Line plot of relative cost per test case."""
-    pp = _prepare_results(df)
-    df = pp["df"]
-
-    agg = (df.groupby(["test_id", "alg"])
-             .agg(mean_rel=("rel_cost", "mean"))
-             .reset_index())
-
-    plt.figure(figsize=(10, 5))
-    for alg, sub in agg.groupby("alg"):
-        plt.plot(sub["test_id"], sub["mean_rel"], "-o", label=alg)
-
-    plt.xlabel("Test Number")
-    plt.ylabel("Average Relative Cost (cost / scenario best)")
-    plt.title("Algorithm Quality per Test Case")
-    plt.xticks(sorted(df["test_id"].unique()))
-    plt.legend(title="Algorithm")
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-
-def plot_runtime_vs_cost(df: pd.DataFrame, savefile: str = "runtime_vs_cost.png"):
-    """Scatter plot of runtime vs absolute cost (linear scale)."""
-    pp = _prepare_results(df)
-    df = pp["df"]
-
-    plt.figure(figsize=(10, 6))
-    palette = sns.color_palette("Set1", df["alg"].nunique())
-    sns.scatterplot(
-        data=df,
-        x="runtime",
-        y="cost",
-        hue="alg",
-        style="alg",
-        palette=palette,
-        s=80
-    )
-    plt.xlabel("Runtime (s)")
-    plt.ylabel("Cost")
-    plt.title("Runtime vs Cost")
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-
-def plot_mean_cost_per_alg(df: pd.DataFrame, savefile: str = "mean_cost_bar.png"):
-    """Bar plot of mean relative cost per algorithm."""
-    pp = _prepare_results(df)
-    df = pp["df"]
-
-    mean_rel = df.groupby("alg")["rel_cost"].mean().sort_values()
-    plt.figure(figsize=(7, 4))
-    sns.barplot(x=mean_rel.index, y=mean_rel.values, palette="Set2")
-    plt.ylabel("Mean Relative Cost (↓ is better)")
-    plt.title("Average Quality by Algorithm")
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-def plot_mean_metric_per_algorithm(df, metric, ylabel, title, savefile):
-    plt.figure(figsize=(8, 5))
-    mean_vals = df.groupby("alg")[metric].mean().sort_values()
-    sns.barplot(x=mean_vals.index, y=mean_vals.values, palette="Set2")
-    plt.ylabel(ylabel)
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-    # Print the computed averages to console
-    print(f"\nAverage {metric} per algorithm:")
-    print(mean_vals.round(3).to_string())
-    print("-" * 50)
-
-
-def plot_distance_vs_conflicts(df, savefile="distance_vs_conflicts.png"):
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(
-        data=df,
-        x="distance",
-        y="conflicts",
-        hue="alg",
-        style="alg",
-        s=100
-    )
-    plt.xlabel("Total Distance")
-    plt.ylabel("Number of Conflicts")
-    plt.title("Distance–Conflicts Trade-off")
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-def plot_fitness_vs_problem_category(df, savefile="fitness_vs_problem_category.png"):
-    df = df.copy()
-    # Create tuple-based problem categories and sort them
-    df["problem_category"] = list(zip(df["agents"], df["goals"]))
-    df["problem_category"] = df["problem_category"].apply(lambda x: (int(x[0]), float(x[1])))
-    df = df.sort_values(by=["agents", "goals"])
-
-    # Aggregate mean cost per category and algorithm
-    agg = (
-        df.groupby(["problem_category", "alg"])
-          .agg(mean_cost=("cost", "mean"))
-          .reset_index()
-    )
-
-    # Prepare sorted x-ticks
-    categories = sorted(agg["problem_category"].unique(), key=lambda x: (x[0], x[1]))
-    x_indices = range(len(categories))
-
-    # Prepare the plot
-    plt.figure(figsize=(10, 6))
-    markers = ['o', '^', 's', 'D', '*', 'x']
-    colors = ['red', 'blue', 'green', 'purple', 'orange', 'black']
-
-    for idx, (alg, sub) in enumerate(agg.groupby("alg")):
-        sub = sub.set_index("problem_category").loc[categories].reset_index()
-        plt.plot(x_indices, sub["mean_cost"],
-                 marker=markers[idx % len(markers)],
-                 color=colors[idx % len(colors)],
-                 label=alg,
-                 linewidth=2)
-
-    # X-axis with tuple labels
-    plt.xticks(ticks=x_indices, labels=[f"{r}×{g:.1f}" for r, g in categories], rotation=45)
-    plt.yscale('linear')
-    plt.xlabel("Problem Category (#robots × #goals per robot)")
-    plt.ylabel("Fitness (Cost, log scale)")
-    plt.title("Algorithm Fitness vs Problem Category")
-    plt.legend(title="Algorithm")
-    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.tight_layout()
-    plt.savefig(savefile, dpi=300)
-    plt.show()
-
-    
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run P3 and P3_2 on every scenario file in a folder")
-    parser.add_argument("folder", help="Folder containing scenario files")
-    args = parser.parse_args()
-
-    #df = batch_folder(args.folder)
-    #df.to_csv(OUT_CSV, index=False)
-    #print("Saved raw results to", OUT_CSV)
-
-    df = pd.read_csv("benchmark_raw.csv")
-    #print(df.head())
-    #plot_summary(df, metric="cost", savefile="cost_summary.png")
-    #plot_test_vs_fitness(df,  savefile="cost_by_test.png")
-    #plot_runtime_vs_cost(df)                     # scatter (log cost)
-    #plot_mean_cost_per_alg(df)                   # bar (relative cost)
-
-    # Plot 1: Mean Cost per Algorithm
-    plot_mean_metric_per_algorithm(
-        df,
-        metric="cost",
-        ylabel="Mean Final Cost",
-        title="Mean Final Cost per Algorithm",
-        savefile="mean_cost_per_algorithm.png"
-    )
-
-
-    # Plot 3: Mean Conflicts per Algorithm
-    plot_mean_metric_per_algorithm(
-        df,
-        metric="conflicts",
-        ylabel="Mean Number of Conflicts",
-        title="Mean Number of Conflicts per Algorithm",
-        savefile="mean_conflicts_per_algorithm.png"
-    )
-
-    plot_fitness_vs_problem_category(df, savefile="fitness_vs_problem_category.png")
+    config = load_config()
+    df = run_experiment(config)
+    out_file = config["simulation_params"].get("result_file", "results.csv")
+    df.to_csv(out_file, index=False)
+    print(f"\nSaved results to {out_file}")
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     main()

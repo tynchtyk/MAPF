@@ -1,0 +1,1 @@
+scenario_id,agents,goals,alg,seed,cost,distance,conflicts,success,runtime,time_to_feasible,time_to_best_feasible,total_evals,wait_actions,best_time_history,chhm_improvements,rgcm_improvements,error

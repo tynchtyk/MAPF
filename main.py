@@ -1,21 +1,17 @@
 import yaml
-from utils import *
+from utils.utils import *
 from algorithms.ga import TimeLogger
-from algorithms.p3_dsm import P3_DSM
-from algorithms.p3_dsm_robot_conflicts import P3_DSM_ROBOT_CONFLICRS
+from algorithms.p3_dsm_robot_conflicts import P3_DSM_ROBOT_CONFLICTS
 from algorithms.p3_dsm_hybrid import P3_DSM_HYBRID
 from algorithms.p3_base import P3_Base
-from algorithms.p3_cdgx import P3_CDGX
-#from algorithms.optimized_ea import PathBasedEA_DEAP
-from map_graph import MapfGraph
-from plot import *
+from utils.map_graph import MapfGraph
+from utils.plot import *
 import numpy as np
 import time
 
 def load_config(path="config.yaml"):
     with open(path, 'r') as file:
         return yaml.safe_load(file)
-
 
 
 """def run_deap_ea_multi():
@@ -97,30 +93,6 @@ def run_feasibile_only_ea():
     visualize_solution(graph, robots, solution)
     plot_deap_statistics(logbook)"""
 
-def run_deap_ea():
-    config = load_config()
-
-    # Load agents and map
-    graph, robots = load_map_and_robots(config['scenario_file'])
-    print(robots)
-
-    #show_graph_structure(graph)
-    #show_graph_with_robots(graph, robots)
-
-    # Plug in any algorithm here
-    algo = PathBasedEA_DEAP(graph, 
-                    robots, 
-                    config['ea_params']['population_size'],
-                    config['ea_params']['num_generations'],
-                    config['ea_params']['mutation_rate'],
-                    config['ea_params']['crossover_rate'],)
-    #algo.initial_population()
-    solution, logbook = algo.run()
-
-    # Visualize or output
-    visualize_solution(graph, robots, solution)
-    plot_deap_statistics(logbook)
-#    plot_analysis(analysis)
 
 def run_p3_base():
     config = load_config()
@@ -154,8 +126,7 @@ def run_p3_dsm():
 
     # Plug in any algorithm here
     p3_DSM = P3_DSM_HYBRID(graph, 
-             robots, 
-             config['ea_params']['num_generations'])
+             robots)
 
     best, best_history, avg_history, conf_history = p3_DSM.run()
     print("Best fitness", best)
@@ -216,12 +187,12 @@ def main():
     #run_deap_ea()
     #run_p3_base()
     #run_p3_cdgx()
-    #run_p3_dsm()
+    run_p3_dsm()
     #run_non_deap_ea()
     #run_deap_ea_multi()
 
-    all_p3_base, algo_dsm_robot_conflicts, all_p3_dsm_hybrid, times_p3_base, times_p3_dsm_robot_conflicts, times_p3_dsm_hybrid = collect_histories(2)
-    show_statistics_mean_std(all_p3_base, algo_dsm_robot_conflicts, all_p3_dsm_hybrid)
-    plot_runtime_comparison(times_p3_base, times_p3_dsm_robot_conflicts, times_p3_dsm_hybrid)
+    #all_p3_base, algo_dsm_robot_conflicts, all_p3_dsm_hybrid, times_p3_base, times_p3_dsm_robot_conflicts, times_p3_dsm_hybrid = collect_histories(1)
+    #show_statistics_mean_std(all_p3_base, algo_dsm_robot_conflicts, all_p3_dsm_hybrid)
+    #plot_runtime_comparison(times_p3_base, times_p3_dsm_robot_conflicts, times_p3_dsm_hybrid)
 if __name__ == "__main__":
     main()

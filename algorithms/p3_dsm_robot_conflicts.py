@@ -1,310 +1,266 @@
 import random
 import copy
 import math
-import warnings # Import warnings module to handle warnings
-from collections import defaultdict, Counter
-from typing import Dict, List, Tuple, Any, Optional # Added Optional
 import numpy as np
-#from sklearn.cluster import KMeans # Not used
-import networkx as nx
+from typing import Dict, List, Any
 from algorithms.ga import GA
 
-# --- Type Hint Placeholders ---
-# Replace these with actual classes or Protocols if available
-GraphType = Any
-RobotType = Any
-NodeId = Any # Type for graph node identifiers (e.g., int, str, tuple)
-Path = List[NodeId]
-Individual = Dict[int, Path]
+Individual = Dict[int, List[Any]]
 
-class P3_DSM_ROBOT_CONFLICRS(GA):
+class P3_DSM_ROBOT_CONFLICTS(GA):
     """
-    Implements the Parameter-less Population Pyramid (P3) algorithm
-    enhanced with Dependency Structure Matrix (DSM) Linkage-Tree mixing
-    for solving Multi-Agent Path Finding (MAPF) problems.
-
-    (Full docstring as provided previously)
+    Baseline B: RGCM (Robot Grouping based on Conflict Matrix).
+    Updated to track Best SOC (Any) history.
     """
 
-    # ----- construction --------------------------------------------------
-    def __init__(
-        self,
-        graph: GraphType,
-        robots: List[RobotType],
-        generations: int = 200,
-        local_steps: int = 5,
-    ) -> None:
-        super().__init__(graph, robots, generations, local_steps)
+    def __init__(self, graph, robots, local_steps: int = 5, max_seconds: float = 3.0, patience: int = 1000):
+        super().__init__(graph, robots, generations=0, local_steps=local_steps)
+        self.max_seconds = float(max_seconds)
+        self.patience = int(patience)
         self.pyramid: List[List[Individual]] = []
+        self.rgcm_improvements = 0
 
-        # Constants for Linkage Tree Mixing
-        self.LT_PAD: Optional[NodeId] = None # Sentinel for padding in flattened representation (Make Optional explicit)
-        self.LT_Q: float = 0.5  # Acceptance probability for cluster swap in _optimal_mix
+    def run(self):
+        self._set_deadline(self.max_seconds)
+        
+        time_to_feasible = None
+        time_to_best_feasible = -1.0
+        best_time_history = [] 
+        
+        self.best_individual = None
+        self.best_cost = float("inf")
+        best_feasible_individual = None
+        best_feasible_cost = float("inf")
+        
+        no_improve_counter = 0
 
-    # ----- public API --------------------------------------------
-    def run(self) -> Tuple[Optional[Individual], List[float], List[float], List[float]]:
-        """
-        Executes the main evolutionary loop of the P3 algorithm.
-        (Full docstring as provided previously)
-        """
-        for gen in range(self.generations):
-            indiv = self.first_improvement_hill_climber(self.generate_individual(), self.local_steps)
+        try:
+            if self._time_is_up(): 
+                return self._build_stats(None, 0, -1, -1, [])
 
-            for level_pop in self.pyramid:
-                if not level_pop:
-                    continue
-                partner = random.choice(level_pop)
-                child = self._optimal_mix(indiv, partner, level_pop)
+            indiv = self.generate_individual()
+            
+            start_cost = self.fitness(indiv, modified_rids=None)
+            self.best_individual = copy.deepcopy(indiv)
+            self.best_cost = start_cost
+            best_time_history.append((0.0, self.best_cost))
 
-                child = self.first_improvement_hill_climber(child, max(1, self.local_steps // 4))
-
-                if self.fitness(child) < self.fitness(indiv):
-                    indiv = child # Update indiv if child is better
-
-            # 3) Insert into pyramid
-            current_max_level_size = 2 ** len(self.pyramid) if self.pyramid else 1
-            if not self.pyramid or len(self.pyramid[-1]) >= current_max_level_size:
-                self.pyramid.append([]) # Add a new level
-            self.pyramid[-1].append(indiv) # Add individual to the last level
-
-            # 4) Elitism: Track the best solution found globally
-            f = self.fitness(indiv)
-            if f < self.best_cost:
-                self.best_cost = f
+            indiv = self.first_improvement_hill_climber(indiv, self.local_steps)
+            
+            indiv_cost = self.fitness(indiv, modified_rids=None)
+            
+            if indiv_cost < self.best_cost:
+                self.best_cost = indiv_cost
                 self.best_individual = copy.deepcopy(indiv)
+                best_time_history.append((self._elapsed(), self.best_cost))
 
-            # 5) Stats collection
-            all_ind = [i for lvl in self.pyramid for i in lvl]
-            if all_ind:
-                 with warnings.catch_warnings():
-                      warnings.simplefilter("ignore", category=RuntimeWarning)
-                      costs = np.array([self.fitness(i) for i in all_ind])
-                      confs = np.array([len(self._detect_conflicts(i)) for i in all_ind])
-                      avg_cost = float(np.nanmean(costs)) # Use nanmean
-                      avg_conf = float(np.nanmean(confs)) # Use nanmean
-                 self.avg_history.append(avg_cost)
-                 self.conf_history.append(avg_conf)
-            else:
-                 # Append current best cost or NaN if no individuals exist yet
-                 self.avg_history.append(self.best_cost if self.best_cost != math.inf else math.nan)
-                 self.conf_history.append(0.0) # No conflicts if no individuals
-            self.best_history.append(self.best_cost)
+            conflicts = self._detect_conflicts(indiv)
+            if not conflicts:
+                best_feasible_individual = copy.deepcopy(indiv)
+                best_feasible_cost = indiv_cost
+                time_to_feasible = 0.0
+                time_to_best_feasible = 0.0
 
+            while not self._time_is_up():
+                indiv = self.generate_individual()
+                indiv = self.first_improvement_hill_climber(indiv, self.local_steps)
+                if self._time_is_up(): break
 
-            # Print progress (consider using logging module for more control)
-            print(
-                f"Gen {gen:3d} | "
-                f"Best {self.best_cost:.1f} | "
-                f"Avg {self.avg_history[-1]:.1f} | "
-                f"Conf {self.conf_history[-1]:.2f}"
-            )
+                indiv_cost = self.fitness(indiv, modified_rids=None)
 
-        return self.best_individual, self.best_history, self.avg_history, self.conf_history
+                # RGCM Mixing
+                for level_pop in self.pyramid:
+                    if self._time_is_up(): break
+                    if not level_pop: continue
+                    partner = random.choice(level_pop)
+                    child = self._optimal_mix(indiv, partner, level_pop)
+                    if self._time_is_up(): break
+                    
+                    ls_steps = max(1, self.local_steps // 4)
+                    child = self.first_improvement_hill_climber(child, ls_steps)
+                    if self._time_is_up(): break
+                    
+                    child_cost = self.fitness(child, modified_rids=None)
+                    if child_cost < indiv_cost:
+                        indiv = child
+                        indiv_cost = child_cost
 
-   
-    # ----- BB-Mix with vertex-tape linkage tree ------------------------
-    # LT_PAD, LT_Q defined in __init__
+                if self._time_is_up(): break
 
-    def _optimal_mix(self, receiver: Individual, donor: Individual, population: List[Individual]) -> Individual:
-        if not population:
-            return receiver 
+                max_level_sz = 2 ** len(self.pyramid) if self.pyramid else 1
+                if not self.pyramid or len(self.pyramid[-1]) >= max_level_sz:
+                    self.pyramid.append([])
+                self.pyramid[-1].append(copy.deepcopy(indiv))
 
+                conflicts = self._detect_conflicts(indiv)
+                t = self._elapsed()
+
+                if indiv_cost < self.best_cost:
+                    self.best_cost = indiv_cost
+                    self.best_individual = copy.deepcopy(indiv)
+                    best_time_history.append((t, self.best_cost)) 
+                    no_improve_counter = 0
+                else:
+                    no_improve_counter += 1
+
+                if not conflicts:
+                    if time_to_feasible is None:
+                        time_to_feasible = t
+                    if indiv_cost < best_feasible_cost:
+                        best_feasible_cost = indiv_cost
+                        best_feasible_individual = copy.deepcopy(indiv)
+                        time_to_best_feasible = t
+
+                if no_improve_counter >= self.patience:
+                    break
+        
+        except Exception as e:
+            print(f"DEBUG: Internal Exception in P3_DSM_ROBOT_CONFLICTS: {e}")
+
+        return self._build_stats(best_feasible_individual, best_feasible_cost, time_to_feasible, time_to_best_feasible, best_time_history)
+
+    def _build_stats(self, best_feasible_indiv, best_feasible_cost, time_to_feasible, time_to_best_feasible, best_time_history):
+        """
+        Only returns metrics required for:
+        1. Success Rate
+        2. SOC (Distance)
+        3. Conflict Count
+        4. Time to Solution
+        5. Convergence Plots
+        """
+        final_best = best_feasible_indiv if best_feasible_indiv is not None else self.best_individual
+        final_conflicts = -1
+        
+        # If we have a solution (feasible or not), calculate conflicts
+        if final_best:
+            final_conflicts = len(self._detect_conflicts(final_best))
+        
+        success = 1 if (best_feasible_indiv is not None) else 0
+
+        # "distance" in the CSV usually maps to 'cost' here if feasible.
+        # If infeasible, self.best_cost includes penalties, but that's fine for the 'cost' column.
+        # We return the best COST found (which is SOC if feasible).
+        reported_cost = best_feasible_cost if best_feasible_indiv else self.best_cost
+
+        stats = {
+            "cost": reported_cost,         # Kept for compatibility
+            "conflicts": final_conflicts,  # Required for Conflict plots
+            "success": success,            # Required for Success plots
+            "time_to_feasible": time_to_feasible if time_to_feasible is not None else -1.0, # Required for Time plots
+            "time_to_best_feasible": time_to_best_feasible if best_feasible_indiv else -1.0, # Required for Time plots
+            "best_time_history": best_time_history, # Required for Convergence plots
+        }
+        
+        safe_return = self.repair_individual(final_best, conflict_repair=False) if final_best else self.generate_individual()
+        return safe_return, stats
+
+    def _optimal_mix(self, receiver, donor, population):
+        if not population or self._time_is_up(): return receiver
         dsm = self._build_dsm(population)
-        lt = self._linkage_tree(dsm)            
-        current, f_cur = receiver, self.fitness(receiver)
-
-        for cluster in lt:                     
+        if dsm is None or self._time_is_up(): return receiver
+        linkage = self._linkage_tree(dsm)
+        if self._time_is_up(): return receiver
+        current = copy.deepcopy(receiver)
+        f_cur = self.fitness(current, modified_rids=None)
+        
+        for cluster in linkage:
+            if self._time_is_up(): break
             trial = copy.deepcopy(current)
-            for rid_idx in cluster:            
-                rid = self.robots[rid_idx].robot_id
-                trial[rid] = copy.deepcopy(donor[rid])
-
+            for rid_idx in cluster:
+                # Safe bounds check
+                if rid_idx < len(self.robots):
+                    rid = self.robots[rid_idx].robot_id
+                    trial[rid] = copy.deepcopy(donor[rid])
+            
+            if self._time_is_up(): break
             trial = self.repair_individual(trial, conflict_repair=True)
-            f_trial = self.fitness(trial)
-            if f_trial < f_cur:                 
+            f_trial = self.fitness(trial, modified_rids=None)
+            
+            if f_trial < f_cur:
                 current, f_cur = trial, f_trial
-
+                
         return current
 
-
-    def _build_dsm(self, population: List[Individual]) -> Tuple[Optional[np.ndarray], Tuple[int, int]]:
-        """
-        Return an R×R DSM where R = #robots.
-        d(i,j) is 0 if robots i and j ALWAYS collide,
-                1 if they NEVER collide,
-                in between according to mutual information of the binary
-                variable  Z_{ij} = 1⇔(i,j) collide in the plan.
-        """
-        R = len(self.robots)
-        m = len(population)
-        if m == 0 or R <= 1:
-            return None                            # nothing to do
-
-        # --- count how many plans show a collision for each robot pair ----
+    def _build_dsm(self, population):
+        R = len(self.robots); m = len(population)
+        if m == 0 or R <= 1: return None
+        
+        id_to_index = {robot.robot_id: idx for idx, robot in enumerate(self.robots)}
         pair_hits = np.zeros((R, R), dtype=int)
-        for indiv in population:
+        
+        # Optimize: Sample population if too large
+        sample_size = min(len(population), 20)
+        sampled_pop = random.sample(population, sample_size)
+
+        for indiv in sampled_pop:
+            if self._time_is_up(): return None
             seen = set()
             for _, _, _, r1, r2 in self._detect_conflicts(indiv):
-                i, j = sorted((r1, r2))
-                if (i, j) not in seen:            # count at most once per indiv
+                i = id_to_index.get(r1, r1); j = id_to_index.get(r2, r2)
+                if i >= R or j >= R: continue
+                i, j = sorted((i, j))
+                if (i, j) not in seen:
                     pair_hits[i, j] += 1
                     seen.add((i, j))
-
-        # --- convert to mutual-information distance -----------------------
-        eps = 1e-12
-        H_row = np.zeros(R)
-        dsm   = np.ones((R, R), dtype=float)
-
+        
+        eps = 1e-12; H_row = np.zeros(R); dsm = np.ones((R, R), dtype=float)
         for i in range(R):
             for j in range(i + 1, R):
-                p1 = pair_hits[i, j] / m          # probability of collision
-                if p1 < eps or p1 > 1 - eps:
-                    H = 0.0                       # fully deterministic
-                else:
-                    H = -p1 * math.log2(p1) - (1 - p1) * math.log2(1 - p1)
-                H_row[i] = max(H_row[i], H)
-                H_row[j] = max(H_row[j], H)
-                dsm[i, j] = dsm[j, i] = 1.0 - H   # provisional
-
-        # normalise by max(H_i, H_j)
+                p1 = pair_hits[i, j] / sample_size
+                if p1 < eps or p1 > 1 - eps: H = 0.0
+                else: H = -p1 * math.log2(p1) - (1 - p1) * math.log2(1 - p1)
+                H_row[i] = max(H_row[i], H); H_row[j] = max(H_row[j], H)
+                dsm[i, j] = dsm[j, i] = 1.0 - H
+                
         for i in range(R):
             for j in range(i + 1, R):
                 hmax = max(H_row[i], H_row[j])
                 dsm[i, j] = dsm[j, i] = 1.0 if hmax < eps else dsm[i, j] / hmax
-
         return dsm
 
-    def _linkage_tree(self, dsm: np.ndarray) -> List[List[int]]:
-        """
-        Builds a linkage tree (hierarchical clustering) from a DSM using
-        a custom Nearest Neighbor Chain heuristic.
-        NOTE: This implementation differs from standard libraries like scipy.
-              It aims to produce a flat list ordered leaf->root via DFS.
-        (Docstring reflects the custom nature)
-        """
+    def _linkage_tree(self, dsm):
+        # Using Inverted Distance (1 - Dependency)
         num_vars = len(dsm)
-        if num_vars == 0: return []
-        if num_vars == 1: return [[0]]
-
-        # Check for NaNs or Infs in DSM, which can break clustering
-        if np.any(np.isnan(dsm)) or np.any(np.isinf(dsm)):
-            warnings.warn("NaN or Inf detected in DSM, cannot build linkage tree.")
-            # Try to clean DSM or return empty list
-            # dsm = np.nan_to_num(dsm, nan=1.0, posinf=1.0, neginf=1.0) # Option: replace bad values
-            return [] # Return empty, OM will skip
-
-        # Copy DSM to avoid modifying original, ensure float type
-        current_dist_matrix = dsm.copy().astype(float)
-        # Set diagonal to infinity to avoid self-clustering
-        np.fill_diagonal(current_dist_matrix, math.inf)
-
-        # clusters is a list where each element represents an active cluster (list of original indices)
-        clusters: List[List[int]] = [[i] for i in range(num_vars)]
-        # Map from the index in the *current* distance matrix back to the index in the `clusters` list
-        active_indices = list(range(num_vars))
-
-        # Store the hierarchy for DFS traversal later
-        # node_list stores cluster contents (initially singletons)
-        node_list: List[Any] = [[i] for i in range(num_vars)]
-        # children[i] will store the two children indices (in node_list) that merged to form node i
-        children: Dict[int, Tuple[int, int]] = {}
-        next_node_idx = num_vars # Index for newly created internal nodes
-
-        for _ in range(num_vars - 1): # Perform n-1 merges
-             if len(active_indices) < 2: break # Stop if fewer than 2 clusters remain
-
-             # Find the minimum distance in the current distance matrix
-             # NOTE: This is closer to standard single/complete linkage finding the global minimum
-             # The original "chain" logic seemed more complex. This is more standard.
-             min_dist = np.min(current_dist_matrix)
-             # Check if min_dist is valid
-             if min_dist == math.inf:
-                  warnings.warn("Could not find finite distance pair in linkage tree merge. Stopping early.")
-                  break
-
-             # Find indices (in the *current* matrix) of the minimum distance pair
-             merge_matrix_idx1, merge_matrix_idx2 = np.unravel_index(np.argmin(current_dist_matrix), current_dist_matrix.shape)
-
-             # Map matrix indices back to indices in the `clusters` list / `active_indices` list
-             # These indices point to the nodes in node_list being merged
-             node_idx1 = active_indices[merge_matrix_idx1]
-             node_idx2 = active_indices[merge_matrix_idx2]
-
-             # Create new cluster content and add to node_list
-             merged_content = node_list[node_idx1] + node_list[node_idx2]
-             node_list.append(merged_content)
-             new_node_internal_idx = next_node_idx
-             children[new_node_internal_idx] = (node_idx1, node_idx2) # Record children
-             next_node_idx += 1
-
-             # --- Update Distance Matrix (Single Linkage Example) ---
-             # Remove rows/columns corresponding to merged clusters
-             # Create new row/column for the merged cluster
-             m = current_dist_matrix.shape[0]
-             new_dist_matrix = np.full((m - 1, m - 1), math.inf)
-
-             # Calculate distances from the new cluster to all others (Single Linkage)
-             new_distances = []
-             idx_map = {} # Map old matrix index to new matrix index
-             new_idx_counter = 0
-             for i in range(m):
-                  if i != merge_matrix_idx1 and i != merge_matrix_idx2:
-                      # Distance is min(dist(new, old_i)) = min(dist(c1, old_i), dist(c2, old_i))
-                      dist1 = current_dist_matrix[merge_matrix_idx1, i]
-                      dist2 = current_dist_matrix[merge_matrix_idx2, i]
-                      new_dist = min(dist1, dist2)
-                      new_distances.append(new_dist)
-                      idx_map[i] = new_idx_counter
-                      new_idx_counter += 1
-
-             # Populate the new matrix
-             new_m = m - 1
-             for r in range(new_m -1): # Fill upper triangle of existing clusters part
-                  old_r = [k for k, v in idx_map.items() if v == r][0]
-                  for c in range(r + 1, new_m -1):
-                       old_c = [k for k, v in idx_map.items() if v == c][0]
-                       new_dist_matrix[r, c] = new_dist_matrix[c, r] = current_dist_matrix[old_r, old_c]
-
-             # Add distances for the newly merged cluster (last row/col)
-             if new_distances: # Check if new_distances is not empty
-                 new_dist_matrix[:-1, -1] = new_distances
-                 new_dist_matrix[-1, :-1] = new_distances
-
-             np.fill_diagonal(new_dist_matrix, math.inf) # Keep diagonal infinite
-             current_dist_matrix = new_dist_matrix
-
-             # Update active_indices: remove merged, add new internal node index
-             new_active_indices = [active_indices[i] for i in range(len(active_indices)) if i != merge_matrix_idx1 and i != merge_matrix_idx2]
-             new_active_indices.append(new_node_internal_idx)
-             active_indices = new_active_indices
-
-
-        # ---- Flatten the hierarchy using Depth First Search (leaf-first post-order) ----
-        flat_ordered_clusters = []
-        visited = set()
-        # Start DFS from the root node (last added node)
-        root_node_idx = next_node_idx - 1
-
-        def dfs(node_idx):
-            if node_idx in visited:
-                return
-            visited.add(node_idx)
-            # If it's an internal node (has children recorded)
-            if node_idx in children:
-                child1_idx, child2_idx = children[node_idx]
-                dfs(child1_idx)
-                dfs(child2_idx)
-            # Append the content of the cluster (list of original var indices) after visiting children
-            flat_ordered_clusters.append(node_list[node_idx])
-
-        if root_node_idx >= 0 : # Check if any merges happened
-             dfs(root_node_idx)
-        elif num_vars > 0: # Handle case with only one variable
-            flat_ordered_clusters = [[0]]
-
-
-        # The list should contain clusters from leaves up to the root
-        return flat_ordered_clusters
-
-
-   
+        if num_vars <= 1: return [[0]]
+        
+        current_dist = np.full((num_vars, num_vars), math.inf)
+        for i in range(num_vars):
+            for j in range(i + 1, num_vars):
+                current_dist[i, j] = current_dist[j, i] = 1.0 - dsm[i, j]
+        np.fill_diagonal(current_dist, math.inf)
+        
+        active = list(range(num_vars))
+        node_list = [[i] for i in range(num_vars)]
+        children = {}; next_idx = num_vars
+        
+        for _ in range(num_vars - 1):
+            if self._time_is_up(): break
+            if len(active) < 2: break
+            
+            i_mat, j_mat = np.unravel_index(np.argmin(current_dist), current_dist.shape)
+            if current_dist[i_mat, j_mat] == math.inf: break
+            
+            i_node, j_node = active[i_mat], active[j_mat]
+            merged = node_list[i_node] + node_list[j_node]
+            node_list.append(merged); children[next_idx] = (i_node, j_node)
+            
+            m = current_dist.shape[0]; new_dist = np.full((m - 1, m - 1), math.inf)
+            keep = [k for k in range(m) if k not in (i_mat, j_mat)]
+            
+            for r_new, r_old in enumerate(keep):
+                for c_new, c_old in enumerate(keep[r_new + 1 :], start=r_new + 1):
+                    new_dist[r_new, c_new] = new_dist[c_new, r_new] = current_dist[r_old, c_old]
+                    
+            for idx, k in enumerate(keep):
+                new_dist[idx, -1] = new_dist[-1, idx] = min(current_dist[i_mat, k], current_dist[j_mat, k])
+                
+            current_dist = new_dist; active = [active[k] for k in keep] + [next_idx]; next_idx += 1
+            
+        flat = []
+        def dfs(idx):
+            if idx in children: dfs(children[idx][0]); dfs(children[idx][1])
+            flat.append(node_list[idx])
+        if next_idx - 1 < len(node_list): dfs(next_idx - 1)
+        else:
+             for n in node_list: flat.append(n)
+        return flat

@@ -1,0 +1,154 @@
+map:
+  dimensions: [64, 64]
+  obstacles: []
+agents:
+- name: agent0
+  start: [53, 53]
+  goals:
+  - [52, 21]
+  - [13, 10]
+  - [55, 37]
+- name: agent1
+  start: [55, 11]
+  goals:
+  - [56, 30]
+  - [30, 1]
+  - [26, 4]
+- name: agent2
+  start: [20, 10]
+  goals:
+  - [56, 44]
+  - [44, 58]
+  - [57, 57]
+- name: agent3
+  start: [52, 13]
+  goals:
+  - [2, 61]
+  - [24, 43]
+  - [47, 5]
+- name: agent4
+  start: [1, 18]
+  goals:
+  - [49, 30]
+  - [36, 14]
+  - [42, 27]
+- name: agent5
+  start: [36, 35]
+  goals:
+  - [2, 44]
+  - [44, 23]
+  - [40, 38]
+- name: agent6
+  start: [15, 50]
+  goals:
+  - [17, 48]
+  - [24, 56]
+  - [19, 15]
+- name: agent7
+  start: [17, 57]
+  goals:
+  - [33, 55]
+  - [24, 32]
+  - [50, 59]
+- name: agent8
+  start: [28, 11]
+  goals:
+  - [60, 6]
+  - [47, 58]
+  - [59, 39]
+- name: agent9
+  start: [56, 1]
+  goals:
+  - [17, 43]
+  - [18, 60]
+  - [9, 21]
+- name: agent10
+  start: [8, 23]
+  goals:
+  - [13, 44]
+  - [27, 33]
+  - [31, 34]
+- name: agent11
+  start: [18, 47]
+  goals:
+  - [49, 28]
+  - [48, 60]
+  - [47, 57]
+- name: agent12
+  start: [46, 41]
+  goals:
+  - [22, 28]
+  - [53, 48]
+  - [52, 32]
+- name: agent13
+  start: [6, 27]
+  goals:
+  - [35, 7]
+  - [36, 2]
+  - [41, 23]
+- name: agent14
+  start: [6, 59]
+  goals:
+  - [18, 11]
+  - [35, 30]
+  - [54, 54]
+- name: agent15
+  start: [30, 15]
+  goals:
+  - [51, 52]
+  - [40, 28]
+  - [61, 36]
+- name: agent16
+  start: [19, 32]
+  goals:
+  - [59, 12]
+  - [41, 46]
+  - [31, 39]
+- name: agent17
+  start: [12, 2]
+  goals:
+  - [34, 24]
+  - [46, 18]
+  - [32, 27]
+- name: agent18
+  start: [63, 1]
+  goals:
+  - [40, 58]
+  - [21, 33]
+  - [2, 37]
+- name: agent19
+  start: [59, 6]
+  goals:
+  - [55, 40]
+  - [24, 27]
+  - [44, 7]
+- name: agent20
+  start: [48, 62]
+  goals:
+  - [15, 9]
+  - [8, 42]
+  - [27, 36]
+- name: agent21
+  start: [15, 54]
+  goals:
+  - [6, 17]
+  - [39, 34]
+  - [5, 25]
+- name: agent22
+  start: [43, 2]
+  goals:
+  - [13, 58]
+  - [5, 46]
+  - [16, 6]
+- name: agent23
+  start: [50, 30]
+  goals:
+  - [44, 30]
+  - [44, 39]
+  - [13, 45]
+- name: agent24
+  start: [8, 40]
+  goals:
+  - [48, 32]
+  - [42, 18]
+  - [10, 9]

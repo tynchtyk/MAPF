@@ -1,283 +1,350 @@
 import random
 import copy
 import math
-import warnings
-from collections import defaultdict, Counter
-from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
-import networkx as nx
-from algorithms.ga import GA, TimeLogger, log_time
+from collections import defaultdict
+from typing import Dict, List, Any
+from algorithms.ga import GA
 
-# --- Type Hint Placeholders ---
-GraphType = Any
-RobotType = Any
-NodeId = Any
-Path = List[NodeId]
-Individual = Dict[int, Path]
+Individual = Dict[int, List[Any]]
 
 class P3_DSM_HYBRID(GA):
-    """Parameter‑less Population Pyramid (P3) with a HYBRID dependency‑aware
-    recombination operator.  
-    Stage‑A copies entire paths for conflict‑coupled robots (robot–level DSM).
-    Stage‑B immediately splices *only the conflict‑timesteps* inside those
-    robots, borrowing segments from the donor.  All decisions are derived from
-    the conflict list `_detect_conflicts`; no numerical hyper‑parameters are
-    exposed to the user.
+    """
+    Proposed Method: CHHM (Cooperative Hybrid Heuristic Mixing).
+    Returns ONLY essential evaluation metrics.
+    Removed: wait_actions, chhm_improvements, total_evals.
     """
 
-    # ------------------------------------------------------------------
-    def __init__(self, graph: GraphType, robots: List[RobotType],
-                 generations: int = 200, local_steps: int = 5) -> None:
-        super().__init__(graph, robots, generations, local_steps)
+    def __init__(self, graph, robots, local_steps: int = 5, max_seconds: float = 3.0, patience: int = 1000):
+        super().__init__(graph, robots, generations=0, local_steps=local_steps)
+        self.max_seconds = float(max_seconds)
+        self.patience = int(patience)
         self.pyramid: List[List[Individual]] = []
-        self.LT_PAD: Optional[NodeId] = None  # sentinel when padding paths
 
-    # ====================== MAIN EVOLUTIONARY LOOP ====================
-    def run(self) -> Tuple[Optional[Individual], List[float], List[float], List[float]]:
-        for gen in range(self.generations):
+    def run(self):
+        self._set_deadline(self.max_seconds)
+        
+        # --- Metrics Tracking ---
+        best_time_history = []  # [(time, cost), ...]
+        time_to_feasible = None
+        time_to_best_feasible = -1.0
+        
+        self.best_individual = None
+        self.best_cost = float("inf")
+        
+        best_feasible_indiv = None
+        best_feasible_cost = float("inf")
+        
+        no_improve_counter = 0
+
+        # --- 1. Initialization ---
+        if self._time_is_up(): 
+            return self._build_stats(None, 0, -1, [], -1)
+
+        indiv = self.generate_individual()
+        
+        # Log Initial State
+        self.best_individual = copy.deepcopy(indiv)
+        self.best_cost = self.fitness(indiv)
+        best_time_history.append((0.0, self.best_cost))
+
+        # Initial Hill Climber
+        indiv = self.first_improvement_hill_climber(indiv, self.local_steps)
+        
+        indiv_cost = self.fitness(indiv)
+        
+        # Update Best
+        if indiv_cost < self.best_cost:
+            self.best_cost = indiv_cost
+            self.best_individual = copy.deepcopy(indiv)
+            best_time_history.append((self._elapsed(), self.best_cost))
+
+        # Check Feasibility
+        if not self._detect_conflicts(indiv):
+            best_feasible_indiv = copy.deepcopy(indiv)
+            best_feasible_cost = indiv_cost
+            time_to_feasible = 0.0
+            time_to_best_feasible = 0.0
+
+        # --- 2. Main Loop ---
+        while not self._time_is_up():
+            # A. Generate & Local Search
             indiv = self.generate_individual()
             indiv = self.first_improvement_hill_climber(indiv, self.local_steps)
+            if self._time_is_up(): break
 
+            indiv_cost = self.fitness(indiv)
+
+            # B. CHHM Crossover (P3 Pyramid Logic)
             for level_pop in self.pyramid:
-                if not level_pop:
-                    continue
+                if self._time_is_up() or not level_pop: break
+                
                 partner = random.choice(level_pop)
-                child = self._optimal_mix(indiv, partner, level_pop)  # <- HYBRID OPERATOR
-                child = self.first_improvement_hill_climber(child, max(1, self.local_steps // 4))
-                if self.fitness(child) < self.fitness(indiv):
+                child = self._optimal_mix(indiv, partner, level_pop)
+                if self._time_is_up(): break
+                
+                # Small Local Search on Child
+                ls_steps = max(1, self.local_steps // 4)
+                child = self.first_improvement_hill_climber(child, ls_steps)
+                
+                child_cost = self.fitness(child)
+                if child_cost < indiv_cost:
                     indiv = child
+                    indiv_cost = child_cost
 
-            # -------- pyramid bookkeeping ----------
+            if self._time_is_up(): break
+
+            # C. Add to Pyramid
             max_level_sz = 2 ** len(self.pyramid) if self.pyramid else 1
             if not self.pyramid or len(self.pyramid[-1]) >= max_level_sz:
                 self.pyramid.append([])
-            self.pyramid[-1].append(indiv)
+            self.pyramid[-1].append(copy.deepcopy(indiv))
 
-            f = self.fitness(indiv)
-            if f < self.best_cost:
-                self.best_cost, self.best_individual = f, copy.deepcopy(indiv)
+            # --- 3. Convergence & Stats Update ---
+            t = self._elapsed()
+            conflicts = self._detect_conflicts(indiv)
 
-            # statistics
-            all_ind = [i for lvl in self.pyramid for i in lvl]
-            if all_ind:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    c_arr = np.array([self.fitness(i) for i in all_ind])
-                    conf_arr = np.array([len(self._detect_conflicts(i)) for i in all_ind])
-                    self.avg_history.append(float(np.nanmean(c_arr)))
-                    self.conf_history.append(float(np.nanmean(conf_arr)))
+            # Update Global Best (Optimization History)
+            if indiv_cost < self.best_cost:
+                self.best_cost = indiv_cost
+                self.best_individual = copy.deepcopy(indiv)
+                best_time_history.append((t, self.best_cost))
+                no_improve_counter = 0
             else:
-                self.avg_history.append(self.best_cost if self.best_cost != math.inf else math.nan)
-                self.conf_history.append(0.0)
-            self.best_history.append(self.best_cost)
+                no_improve_counter += 1
 
-            print(f"Gen {gen:3d} | Best {self.best_cost:.1f} | Avg {self.avg_history[-1]:.1f} | Conf {self.conf_history[-1]:.2f}")
-        
+            # Update Feasible Best (Success Metrics)
+            if not conflicts:
+                if time_to_feasible is None:
+                    time_to_feasible = t
+                if indiv_cost < best_feasible_cost:
+                    best_feasible_cost = indiv_cost
+                    best_feasible_indiv = copy.deepcopy(indiv)
+                    time_to_best_feasible = t
 
-        return self.best_individual, self.best_history, self.avg_history, self.conf_history
+            if no_improve_counter >= self.patience:
+                break
 
-    # ================= HYBRID RECOMBINATION OPERATOR ==================
-    @log_time
-    def _optimal_mix(self, receiver: Individual, donor: Individual,
-                     population: List[Individual]) -> Individual:
-        """Return a child created by two‑stage optimal mixing.
+        return self._build_stats(
+            best_feasible_indiv, 
+            best_feasible_cost, 
+            time_to_feasible, 
+            best_time_history,
+            time_to_best_feasible
+        )
 
-        * Stage‑A: copy full paths of robots in each linkage cluster from donor
-          to child, evaluate; keep if better.
-        * Stage‑B: regardless of Stage‑A outcome, iterate over conflict hot
-          windows and try the *opposite* parent slice (reintroduce receiver
-          slice if donor path was accepted; insert donor slice if not). Accept
-          window if it improves fitness, recomputing hotspots after each
-          improvement to avoid stale windows and overlap issues.
+    def _build_stats(self, best_feasible_indiv, best_feasible_cost, time_to_feasible, best_time_history, time_to_best_feasible):
         """
-        if not population:
-            return receiver
+        Only returns metrics required for:
+        1. Success Rate
+        2. SOC (Distance)
+        3. Conflict Count
+        4. Time to Solution
+        5. Convergence Plots
+        """
+        final_best = best_feasible_indiv if best_feasible_indiv is not None else self.best_individual
+        final_conflicts = -1
+        
+        # If we have a solution (feasible or not), calculate conflicts
+        if final_best:
+            final_conflicts = len(self._detect_conflicts(final_best))
+        
+        success = 1 if (best_feasible_indiv is not None) else 0
 
-        linkage = self._linkage_tree(self._build_robot_dsm(population))
+        # "distance" in the CSV usually maps to 'cost' here if feasible.
+        # If infeasible, self.best_cost includes penalties, but that's fine for the 'cost' column.
+        # We return the best COST found (which is SOC if feasible).
+        reported_cost = best_feasible_cost if best_feasible_indiv else self.best_cost
+
+        stats = {
+            "cost": reported_cost,         # Kept for compatibility
+            "conflicts": final_conflicts,  # Required for Conflict plots
+            "success": success,            # Required for Success plots
+            "time_to_feasible": time_to_feasible if time_to_feasible is not None else -1.0, # Required for Time plots
+            "time_to_best_feasible": time_to_best_feasible if best_feasible_indiv else -1.0, # Required for Time plots
+            "best_time_history": best_time_history, # Required for Convergence plots
+        }
+        
+        safe_return = self.repair_individual(final_best, conflict_repair=False) if final_best else self.generate_individual()
+        return safe_return, stats
+    
+    def _optimal_mix(self, receiver, donor, population):
+        if not population or self._time_is_up(): return receiver
+        
+        dsm = self._build_robot_dsm(population)
+        if dsm is None: return receiver
+        
+        linkage = self._linkage_tree(dsm)
         current = copy.deepcopy(receiver)
-        f_cur   = self.fitness(current)
-
-        for cluster in linkage:  # leaf → root
+        f_cur = self.fitness(current)
+        
+        for cluster in linkage:
+            if self._time_is_up(): break
+            
             cluster_rids = [self.robots[idx].robot_id for idx in cluster]
-
-            # backup receiver and donor slices for cluster robots
             recv_backup = {rid: current[rid][:] for rid in cluster_rids}
-            donor_paths = {rid: donor[rid][:]   for rid in cluster_rids}
-
-            # ---------------- Stage‑A : whole‑path donor copy ------------
+            donor_paths = {rid: donor[rid][:] for rid in cluster_rids}
+            
+            # --- STAGE A: Block Swap ---
             trialA = copy.deepcopy(current)
-            for rid in cluster_rids:
-                trialA[rid] = donor_paths[rid][:]
+            for rid in cluster_rids: trialA[rid] = donor_paths[rid][:]
+            
+            trialA = self.repair_individual(trialA, conflict_repair=True)
             fA = self.fitness(trialA)
+            
             if fA < f_cur:
-                current, f_cur = trialA, fA     # accept donor macro
-                opposite_source = recv_backup   # Stage‑B will test revert
+                current, f_cur = trialA, fA
+                opposite_source = recv_backup
             else:
-                opposite_source = donor_paths   # donor macro rejected → Stage‑B tests donor windows only
+                opposite_source = donor_paths
+            
+            if self._time_is_up(): break
 
-            # -------------- Stage‑B : window‑level mixing ---------------
-            improved = True
-            while improved:
-                improved = False
-                # hotspots recomputed each outer pass to stay fresh
-                cluster_confs = [c for c in self._detect_conflicts(current)
-                                  if c[3] in cluster_rids or c[4] in cluster_rids]
-                hot = self._hot_positions(cluster_confs)
-
-                for rid in cluster_rids:
-                    windows = self._windows(current[rid], hot.get(rid, set()))
-                    for a, b in windows:  # small → big
-                        # guard unequal lengths
-                        if b >= len(opposite_source[rid]):
-                            continue
-                        if current[rid][a:b+1] == opposite_source[rid][a:b+1]:
-                            continue
-                        cand = copy.deepcopy(current)
-                        cand[rid][a:b+1] = opposite_source[rid][a:b+1]
-                        cand = self.repair_individual(cand, conflict_repair=False)
-                        f_cand = self.fitness(cand)
-                        if f_cand < f_cur:
-                            current, f_cur = cand, f_cand
-                            improved = True  # restart with fresh hotspots
-                            break  # break inner window loop
-                    if improved:
-                        break  # break rid loop to recompute hotspots
+            # --- STAGE B: Window Mixing ---
+            all_conflicts = self._detect_conflicts(current)
+            cluster_confs = [c for c in all_conflicts if c[3] in cluster_rids or c[4] in cluster_rids]
+            
+            if not cluster_confs: continue
+            hot = self._hot_positions(cluster_confs)
+            
+            for rid in cluster_rids:
+                if self._time_is_up(): break
+                if rid not in hot: continue
+                
+                windows = self._windows(current[rid], hot.get(rid, set()))
+                
+                for i, (a, b) in enumerate(windows):
+                    if i > 2 or self._time_is_up(): break
+                    if b >= len(opposite_source[rid]): continue
+                    
+                    if current[rid][a : b + 1] == opposite_source[rid][a : b + 1]: continue
+                    
+                    cand = copy.deepcopy(current)
+                    cand[rid][a : b + 1] = opposite_source[rid][a : b + 1]
+                    cand = self.repair_individual(cand, conflict_repair=True)
+                    
+                    f_cand = self.fitness(cand)
+                    if f_cand <= f_cur:
+                        current, f_cur = cand, f_cand
 
         return current
 
-
-    # ---------------- helper: build robot‑level DSM -------------------
-    def _build_robot_dsm(self, population: List[Individual]) -> np.ndarray:
+    def _build_robot_dsm(self, population):
         R = len(self.robots)
         m = len(population)
-        dsm = np.ones((R, R), dtype=float)
-        if m == 0 or R <= 1:
-            return dsm
-
+        if m == 0 or R <= 1: return None
+        
+        id_to_index = {robot.robot_id: idx for idx, robot in enumerate(self.robots)}
         pair_hits = np.zeros((R, R), dtype=int)
-        for indiv in population:
+        
+        sample_size = min(m, 20)
+        sampled_pop = random.sample(population, sample_size)
+
+        for indiv in sampled_pop:
+            if self._time_is_up(): return None
             seen = set()
             for _, _, _, r1, r2 in self._detect_conflicts(indiv):
-                i, j = sorted((r1, r2))
+                i = id_to_index.get(r1); j = id_to_index.get(r2)
+                if i is None or j is None: continue
+                i, j = sorted((i, j))
                 if (i, j) not in seen:
                     pair_hits[i, j] += 1
                     seen.add((i, j))
-
+        
         eps = 1e-12
         H_row = np.zeros(R)
+        dsm = np.ones((R, R), dtype=float)
+        
         for i in range(R):
             for j in range(i + 1, R):
-                p1 = pair_hits[i, j] / m
-                if p1 < eps or p1 > 1 - eps:
+                p1 = pair_hits[i, j] / sample_size
+                if p1 < eps or p1 > 1 - eps: 
                     H = 0.0
-                else:
+                else: 
                     H = -p1 * math.log2(p1) - (1 - p1) * math.log2(1 - p1)
+                
                 H_row[i] = max(H_row[i], H)
                 H_row[j] = max(H_row[j], H)
                 dsm[i, j] = dsm[j, i] = 1.0 - H
+
         for i in range(R):
             for j in range(i + 1, R):
                 hmax = max(H_row[i], H_row[j])
                 dsm[i, j] = dsm[j, i] = 1.0 if hmax < eps else dsm[i, j] / hmax
+
         return dsm
 
-    # --------------- helper: linkage tree (unchanged) -----------------
-    def _linkage_tree(self, dsm: np.ndarray) -> List[List[int]]:
+    def _linkage_tree(self, dsm):
         num_vars = len(dsm)
-        if num_vars == 0:
-            return []
-        if num_vars == 1:
-            return [[0]]
-
-        current = dsm.copy().astype(float)
-        np.fill_diagonal(current, math.inf)
+        if num_vars <= 1: return [[0]]
+        
+        current_dist = np.full((num_vars, num_vars), math.inf)
+        for i in range(num_vars):
+            for j in range(i + 1, num_vars):
+                current_dist[i, j] = current_dist[j, i] = 1.0 - dsm[i, j]
+        np.fill_diagonal(current_dist, math.inf)
+        
         active = list(range(num_vars))
-        node_list: List[Any] = [[i] for i in range(num_vars)]
-        children: Dict[int, Tuple[int, int]] = {}
+        node_list = [[i] for i in range(num_vars)]
+        children = {}
         next_idx = num_vars
-
+        
         for _ in range(num_vars - 1):
-            if len(active) < 2:
-                break
-            i_mat, j_mat = np.unravel_index(np.argmin(current), current.shape)
-            if current[i_mat, j_mat] == math.inf:
-                break
+            if self._time_is_up() or len(active) < 2: break
+            
+            i_mat, j_mat = np.unravel_index(np.argmin(current_dist), current_dist.shape)
+            if current_dist[i_mat, j_mat] == math.inf: break
+                
             i_node, j_node = active[i_mat], active[j_mat]
             merged = node_list[i_node] + node_list[j_node]
             node_list.append(merged)
             children[next_idx] = (i_node, j_node)
-
-            # update distance matrix (single linkage)
-            m = current.shape[0]
-            new = np.full((m - 1, m - 1), math.inf)
-            new_dists = []
+            
+            m = current_dist.shape[0]
+            new_dist = np.full((m - 1, m - 1), math.inf)
             keep = [k for k in range(m) if k not in (i_mat, j_mat)]
-            for k in keep:
-                new_dists.append(min(current[i_mat, k], current[j_mat, k]))
-            for r, old_r in enumerate(keep):
-                for c, old_c in enumerate(keep[r + 1:], start=r + 1):
-                    new[r, c] = new[c, r] = current[old_r, old_c]
-            if new_dists:
-                new[:-1, -1] = new_dists
-                new[-1, :-1] = new_dists
-            np.fill_diagonal(new, math.inf)
-            current = new
-
+            
+            for r_new, r_old in enumerate(keep):
+                for c_new, c_old in enumerate(keep[r_new + 1:], start=r_new + 1):
+                    new_dist[r_new, c_new] = new_dist[c_new, r_new] = current_dist[r_old, c_old]
+            
+            for idx, k in enumerate(keep):
+                new_dist[idx, -1] = new_dist[-1, idx] = min(current_dist[i_mat, k], current_dist[j_mat, k])
+                
+            current_dist = new_dist
             active = [active[k] for k in keep] + [next_idx]
             next_idx += 1
 
         flat = []
-        root = next_idx - 1
-        visited = set()
-
         def dfs(idx):
-            if idx in visited:
-                return
-            visited.add(idx)
-            if idx in children:
+            if idx in children: 
                 dfs(children[idx][0])
                 dfs(children[idx][1])
             flat.append(node_list[idx])
-
-        dfs(root)
+            
+        if next_idx - 1 < len(node_list): dfs(next_idx - 1)
+        else:
+            for n in node_list: flat.append(n)
         return flat
 
-    # ======================= STAGE‑B HELPERS ==========================
     def _hot_positions(self, conflicts):
         H = defaultdict(set)
-        for _, t, _, r1, r2 in conflicts:
+        for _, t, _, r1, r2 in conflicts: 
             H[r1].add(t)
             H[r2].add(t)
-        return H  # robot -> set(timestep)
+        return H
 
-    def _windows(self, path: Path, hot_set: set) -> List[Tuple[int, int]]:
-        if not hot_set:
-            return []
+    def _windows(self, path, hot_set):
+        if not hot_set or not path: return []
         marks = sorted(hot_set)
-        spans = {(max(0, t - 1), min(len(path) - 1, t + 1)) for t in marks}
+        path_len = len(path)
+        spans = {(max(0, t - 1), min(path_len - 1, t + 1)) for t in marks}
+        
         merged = []
         for a, b in sorted(spans):
-            if merged and a <= merged[-1][1] + 1:
+            if merged and a <= merged[-1][1] + 1: 
                 merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-            else:
+            else: 
                 merged.append((a, b))
-        # smallest window first
-        merged.sort(key=lambda ab: (ab[1] - ab[0] + 1))
-        return merged
-
-    def _mix_robot(self, sol: Individual, donor: Individual, rid: int, windows: List[Tuple[int, int]]) -> Individual:
-        if not windows:
-            return sol
-        best = sol
-        f_best = self.fitness(best)
-        recv_path = sol[rid]
-        donor_path = donor[rid]
-        for a, b in windows:
-            candidate_path = recv_path[:a] + donor_path[a:b + 1] + recv_path[b + 1:]
-            cand = copy.deepcopy(best)
-            cand[rid] = candidate_path
-            cand = self.repair_individual(cand, conflict_repair=True)
-            f_cand = self.fitness(cand)
-            if f_cand < f_best:
-                best, f_best, recv_path = cand, f_cand, candidate_path
-        return best
+        
+        return sorted(merged, key=lambda ab: (ab[1] - ab[0] + 1))
